@@ -1,4 +1,6 @@
+import { Show } from "solid-js"
 import { ScrollView } from "@opencode-ai/ui/scroll-view"
+import { useLayout } from "@/context/layout"
 import { createHomeController } from "./home/home-controller"
 import { createHomeProjectsController } from "./home/home-projects-controller"
 import { HomeUtilityNav } from "./home/home-projects-view"
@@ -9,6 +11,7 @@ import { createHomeSessionsController } from "./home/home-sessions-controller"
 import { HomeSessions } from "./home/home-sessions"
 
 export function NewHome() {
+  const layout = useLayout()
   const home = createHomeController()
   const projects = createHomeProjectsController(home)
   const sessions = createHomeSessionsController(home)
@@ -32,17 +35,25 @@ export function NewHome() {
         <div
           class={`
             mx-auto grid min-h-full w-full max-w-[1080px] grid-rows-[auto_minmax(0,1fr)_auto] gap-4 px-3
-            lg:grid-cols-[280px_minmax(0,720px)] lg:grid-rows-1 lg:gap-8 lg:px-6
+            lg:grid-rows-1 lg:gap-8 lg:px-6
           `}
+          classList={{
+            "lg:grid-cols-[280px_minmax(0,720px)]": !layout.sidebar.opened(),
+            "lg:grid-cols-[minmax(0,720px)]": layout.sidebar.opened(),
+          }}
         >
-          <HomeProjects projects={projects} scroll={scroll} />
+          <Show when={!layout.sidebar.opened()}>
+            <HomeProjects projects={projects} scroll={scroll} />
+          </Show>
           <HomeSessions sessions={sessions} search={search} scroll={scroll} />
-          <HomeUtilityNav
-            class="flex lg:hidden"
-            onOpenSettings={projects.utility.settings}
-            onOpenHelp={projects.utility.help}
-            language={projects.copy.language}
-          />
+          <Show when={!layout.sidebar.opened()}>
+            <HomeUtilityNav
+              class="flex lg:hidden"
+              onOpenSettings={projects.utility.settings}
+              onOpenHelp={projects.utility.help}
+              language={projects.copy.language}
+            />
+          </Show>
         </div>
       </ScrollView>
     </div>

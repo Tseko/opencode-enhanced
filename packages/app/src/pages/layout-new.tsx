@@ -1,14 +1,18 @@
-import { createEffect, Suspense, type ParentProps } from "solid-js"
+import { Show, Suspense, createEffect, type ParentProps } from "solid-js"
 import { createStore } from "solid-js/store"
 import { DebugBar } from "@/components/debug-bar"
-import { TabsInfoPopup } from "@/components/help-button"
 import { Titlebar, type TitlebarUpdate } from "@/components/titlebar"
+import { useLayout } from "@/context/layout"
 import { usePlatform } from "@/context/platform"
+import { ResizeHandle } from "@opencode-ai/ui/resize-handle"
 import { setV2Toast, ToastRegion } from "@/utils/toast"
+import { NewLayoutSidebar, NewLayoutSidebarCommands } from "@/pages/layout/new-layout-sidebar"
 
 export default function NewLayout(props: ParentProps) {
   const platform = usePlatform()
+  const layout = useLayout()
   const [state, setState] = createStore({ debugTools: true })
+  const side = () => Math.max(layout.sidebar.width(), 244)
 
   createEffect(() => setV2Toast(true))
 
@@ -30,6 +34,7 @@ export default function NewLayout(props: ParentProps) {
         "padding-bottom": "env(safe-area-inset-bottom, 0px)",
       }}
     >
+      <NewLayoutSidebarCommands />
       <Titlebar
         update={update}
         debugTools={
@@ -38,11 +43,26 @@ export default function NewLayout(props: ParentProps) {
             : undefined
         }
       />
-      <main class="flex-1 min-h-0 min-w-0 overflow-x-hidden flex flex-col items-start contain-strict">
-        <Suspense>{props.children}</Suspense>
-      </main>
+      <div class="flex min-h-0 flex-1">
+        <Show when={layout.sidebar.opened()}>
+          <div class="relative h-full shrink-0" style={{ width: `${side()}px` }}>
+            <NewLayoutSidebar />
+            <div class="absolute inset-y-0 end-0 z-30 w-0 overflow-visible">
+              <ResizeHandle
+                direction="horizontal"
+                size={layout.sidebar.width()}
+                min={244}
+                max={typeof window === "undefined" ? 1000 : Math.max(320, window.innerWidth * 0.4)}
+                onResize={(width) => layout.sidebar.resize(width)}
+              />
+            </div>
+          </div>
+        </Show>
+        <main class="flex min-h-0 min-w-0 flex-1 flex-col items-start overflow-x-hidden contain-strict">
+          <Suspense>{props.children}</Suspense>
+        </main>
+      </div>
       {import.meta.env.DEV && state.debugTools && <DebugBar inline />}
-      <TabsInfoPopup />
       <ToastRegion v2 />
     </div>
   )

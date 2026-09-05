@@ -26,16 +26,15 @@ import { usePlatform } from "@/context/platform"
 import { useCommand } from "@/context/command"
 import { useLanguage } from "@/context/language"
 import { useSettings } from "@/context/settings"
+import { base64Encode } from "@opencode-ai/core/util/encode"
 import { WindowsAppMenu } from "./windows-app-menu"
 import { applyPath, backPath, forwardPath } from "./titlebar-history"
-import { TitlebarTabStrip } from "@/components/titlebar-tab-strip"
 import { makeEventListener } from "@solid-primitives/event-listener"
 import { createMediaQuery } from "@solid-primitives/media"
 import { readSessionTabsRemovedDetail, SESSION_TABS_REMOVED_EVENT } from "@/components/titlebar-session-events"
 import { useGlobal } from "@/context/global"
 import { ServerConnection, useServer } from "@/context/server"
-import { tabKey, useTabs } from "@/context/tabs"
-import type { PromptSession } from "@/context/prompt"
+import { useTabs } from "@/context/tabs"
 import "./titlebar.css"
 import { newTabTooltipKeybind } from "./command-tooltip-keybind"
 import { normalizeSessionInfo } from "@/utils/session"
@@ -261,45 +260,15 @@ export function Titlebar(props: { update?: TitlebarUpdate; debugTools?: { visibl
               tabsStoreActions.removeSessions(detail)
             })
 
-            const openNewTab = () => {
-              const route = layout.route()
-              const activeSession = session()
-              if (route.type === "session" && activeSession) {
-                const sessionTab = {
-                  type: "session" as const,
-                  server: route.server ?? server.key,
-                  sessionId: activeSession.id,
-                }
-                const model = tabs.stateValue<PromptSession>(sessionTab, "prompt")?.model.current()
-                tabs.newDraft({ server: sessionTab.server, directory: activeSession.directory }, "", model)
+            const openNewSession = () => {
+              if (params.dir) {
+                navigate(`/${params.dir}/session`)
                 return
-              }
-
-              const activeTab = currentTab()
-              if (activeTab?.type === "draft") {
-                const model = tabs.stateValue<PromptSession>(activeTab, "prompt")?.model.current()
-                tabs.newDraft({ server: activeTab.server, directory: activeTab.directory }, "", model)
-                return
-              }
-
-              if (route.type === "home") {
-                const selection = layout.home.selection()
-                const conn = global.servers.list().find((item) => ServerConnection.key(item) === selection.server)
-                const project = conn
-                  ? global
-                      .ensureServerCtx(conn)
-                      .projects.list()
-                      .find((item) => item.worktree === selection.directory)
-                  : undefined
-                if (conn && project) {
-                  tabs.newDraft({ server: ServerConnection.key(conn), directory: project.worktree }, "")
-                  return
-                }
               }
 
               const current = layout.projects.list()[0]
               if (current) {
-                tabs.newDraft({ server: server.key, directory: current.worktree }, "")
+                navigate(`/${base64Encode(current.worktree)}/session`)
                 return
               }
 
@@ -308,8 +277,7 @@ export function Titlebar(props: { update?: TitlebarUpdate; debugTools?: { visibl
                 return project ? [{ server: ServerConnection.key(conn), project }] : []
               })[0]
               if (!fallback) return
-
-              tabs.newDraft({ server: fallback.server, directory: fallback.project.worktree }, "")
+              navigate(`/${base64Encode(fallback.project.worktree)}/session`)
             }
             const toggleHome = () => tabs.toggleHome({ home: layout.route().type === "home", current: currentTab() })
 
@@ -318,7 +286,6 @@ export function Titlebar(props: { update?: TitlebarUpdate; debugTools?: { visibl
                 id: "home.toggle",
                 title: language.t("home.title"),
                 category: language.t("command.category.view"),
-                keybind: "mod+b",
                 hidden: true,
                 onSelect: toggleHome,
               },
@@ -334,7 +301,7 @@ export function Titlebar(props: { update?: TitlebarUpdate; debugTools?: { visibl
                   title: language.t("command.session.new"),
                   keybind: "mod+t,mod+n",
                   hidden: true,
-                  onSelect: openNewTab,
+                  onSelect: openNewSession,
                 },
                 current && {
                   id: "tab.close",
@@ -356,8 +323,6 @@ export function Titlebar(props: { update?: TitlebarUpdate; debugTools?: { visibl
               ].filter((v) => v !== undefined)
             })
 
-            const [tabsAreOverflowing, setTabsAreOverflowing] = createSignal(false)
-
             return (
               <div
                 class="h-full flex-1 overflow-hidden flex flex-row items-center gap-1.5 px-2 md:pr-3"
@@ -372,6 +337,34 @@ export function Titlebar(props: { update?: TitlebarUpdate; debugTools?: { visibl
                 <Show when={windows() || linux()}>
                   <WindowsAppMenu command={command} platform={platform} variant="v2" />
                 </Show>
+                <TooltipV2
+                  placement="bottom"
+                  value={
+                    <>
+                      {language.t("command.sidebar.toggle")}
+                      <KeybindV2 keys={command.keybindParts("sidebar.toggle")} variant="neutral" />
+                    </>
+                  }
+                  class="shrink-0"
+                >
+                  <IconButtonV2
+                    type="button"
+                    variant="ghost-muted"
+                    size="large"
+                    class="!w-9 shrink-0"
+                    icon={<IconV2 name="sidebar-right" />}
+                    state={(mobile() ? layout.mobileSidebar.opened() : layout.sidebar.opened()) ? "pressed" : undefined}
+                    onClick={() => {
+                      if (mobile()) {
+                        layout.mobileSidebar.toggle()
+                        return
+                      }
+                      layout.sidebar.toggle()
+                    }}
+                    aria-label={language.t("command.sidebar.toggle")}
+                    aria-pressed={mobile() ? layout.mobileSidebar.opened() : layout.sidebar.opened()}
+                  />
+                </TooltipV2>
                 <TooltipV2
                   placement="bottom"
                   value={
@@ -394,22 +387,7 @@ export function Titlebar(props: { update?: TitlebarUpdate; debugTools?: { visibl
                     aria-pressed={layout.route().type === "home"}
                   />
                 </TooltipV2>
-
-                <TitlebarTabStrip
-                  tabs={tabsStore}
-                  currentTab={currentTab}
-                  forceTruncate={tabsAreOverflowing()}
-                  onOverflowChange={setTabsAreOverflowing}
-                  onNavigate={(tab, el) => {
-                    tabs.select(tab)
-                    el?.scrollIntoView({ behavior: "instant" })
-                  }}
-                  onClose={(tab) => {
-                    const index = tabsStore.findIndex((item) => tabKey(item) === tabKey(tab))
-                    if (index !== -1) tabsStoreActions.closeTab(index)
-                  }}
-                  onReorder={(keys) => tabsStoreActions.reorder(keys)}
-                />
+                <div id="opencode-titlebar-center" class="min-w-0 flex-1 flex items-center justify-center" />
                 <TooltipV2
                   placement="bottom"
                   value={
@@ -425,11 +403,10 @@ export function Titlebar(props: { update?: TitlebarUpdate; debugTools?: { visibl
                     size="large"
                     class="shrink-0"
                     icon={<IconV2 name="plus" />}
-                    onClick={openNewTab}
+                    onClick={openNewSession}
                     aria-label={language.t("command.session.new")}
                   />
                 </TooltipV2>
-                <div class="flex-1" />
                 <TitlebarV2Right state={v2RightState()} />
               </div>
             )

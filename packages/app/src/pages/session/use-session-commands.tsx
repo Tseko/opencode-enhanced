@@ -451,11 +451,7 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
       title: language.t("command.session.new"),
       keybind: "mod+shift+s",
       slash: "new",
-      onSelect: (source) => {
-        if (settings.general.newLayoutDesigns()) {
-          command.trigger("tab.new", source)
-          return
-        }
+      onSelect: () => {
         navigate(`/${params.dir}/session`)
       },
     }),

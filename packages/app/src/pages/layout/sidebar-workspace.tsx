@@ -448,6 +448,7 @@ export const LocalWorkspace = (props: {
   project: LocalProject
   sortNow: Accessor<number>
   mobile?: boolean
+  embedded?: boolean
 }): JSX.Element => {
   const serverSync = useServerSync()
   const queryOptions = useQueryOptions()
@@ -469,8 +470,14 @@ export const LocalWorkspace = (props: {
 
   return (
     <div
-      ref={(el) => props.ctx.setScrollContainerRef(el, props.mobile)}
-      class="size-full flex flex-col py-2 overflow-y-auto no-scrollbar [overflow-anchor:none]"
+      ref={(el) => {
+        if (props.embedded) return
+        props.ctx.setScrollContainerRef(el, props.mobile)
+      }}
+      classList={{
+        "flex flex-col py-1": true,
+        "size-full overflow-y-auto no-scrollbar [overflow-anchor:none]": !props.embedded,
+      }}
     >
       <WorkspaceSessionList
         slug={slug}
