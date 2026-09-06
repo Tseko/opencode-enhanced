@@ -29,7 +29,7 @@ import type { DragEvent } from "@thisbeyond/solid-dnd"
 import { useProviders } from "@/hooks/use-providers"
 import { dismissToast, setV2Toast, showToast, ToastRegion } from "@/utils/toast"
 import { useServerSDK } from "@/context/server-sdk"
-import { normalizeProjectInfo } from "@/context/global-sync/utils"
+import { normalizeProjectInfo, matchProjectInfo } from "@/context/global-sync/utils"
 import { clearWorkspaceTerminals } from "@/context/terminal"
 import { pickSessionCacheEvictions } from "@/context/global-sync/session-cache"
 import { useNotification } from "@/context/notification"
@@ -1290,22 +1290,24 @@ export default function LegacyLayout(props: ParentProps) {
     const current = displayName(project)
     if (next === current) return
     const name = next === getFilename(project.worktree) ? "" : next
+    const sync = serverSync()
 
-    if (project.id && project.id !== "global") {
-      const sdk = serverSDK()
-      if ((await sdk.protocol) !== "v1") return
-      const result = await sdk.client.project
-        .update({ projectID: project.id, directory: project.worktree, name })
-        .then((response) => response.data)
-      if (!result) return
-      // const result = await serverSDK().api.project.update({ projectID: project.id, name })
-      serverSync().set("project", (items) =>
-        items.map((item) => (item.id === result.id ? normalizeProjectInfo(result) : item)),
-      )
-      return
-    }
+    sync.project.meta(project.worktree, { name })
+    sync.set("project", (items) => {
+      const matched = matchProjectInfo(items, { id: project.id, worktree: project.worktree })
+      if (!matched) return items
+      return items.map((item) => (item.id === matched.id ? { ...item, name } : item))
+    })
 
-    serverSync().project.meta(project.worktree, { name })
+    if (!project.id || project.id === "global") return
+
+    const result = await serverSDK()
+      .client.project.update({ projectID: project.id, directory: project.worktree, name })
+      .then((response) => response.data)
+    if (!result) return
+    sync.set("project", (items) =>
+      items.map((item) => (item.id === result.id ? normalizeProjectInfo(result) : item)),
+    )
   }
 
   const renameWorkspace = (directory: string, next: string, projectId?: string, branch?: string) => {

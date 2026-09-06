@@ -63,6 +63,30 @@ describe("MCP queries", () => {
     expect(calls).toEqual([{ location: { directory: "/project" } }])
     expect(result).toEqual({ "docs:docs://guide": { server: "docs", name: "Guide", uri: "docs://guide" } })
   })
+
+  test("treats a missing V2 MCP JSON route as an empty catalog", async () => {
+    const queryClient = new QueryClient()
+    const error = Object.assign(new Error("UnsupportedContentType"), { name: "ClientError" })
+    const servers = await queryClient.fetchQuery(
+      loadMcpQuery(ServerScope.local, "/project", {
+        list: async () => {
+          throw error
+        },
+      } as unknown as McpApi),
+    )
+    const resources = await queryClient.fetchQuery(
+      loadMcpResourcesQuery(ServerScope.local, "/project", {
+        resource: {
+          catalog: async () => {
+            throw error
+          },
+        },
+      } as unknown as McpApi),
+    )
+
+    expect(servers).toEqual({})
+    expect(resources).toEqual({})
+  })
 })
 
 describe("active session query", () => {

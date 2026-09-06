@@ -3,6 +3,7 @@ import type { OpenCodeEvent, SessionMessageInfo, SessionPendingMessage } from "@
 type Assistant = Extract<SessionMessageInfo, { type: "assistant" }>
 type Compaction = Extract<SessionMessageInfo, { type: "compaction" }>
 type Shell = Extract<SessionMessageInfo, { type: "shell" }>
+type EventData = Record<string, unknown>
 
 export type V2SessionReduction = {
   sessionID: string
@@ -11,10 +12,23 @@ export type V2SessionReduction = {
   missing?: string
 }
 
+export function currentV2Event(event: OpenCodeEvent): OpenCodeEvent {
+  const payload = eventPayload(event)
+  if (!payload) return event
+  const created = eventCreated(event, payload)
+  const type = typeof event.type === "string" ? event.type.replace(/\.\d+$/, "") : event.type
+  if (typeof type !== "string" || !type.startsWith("session.next."))
+    return withCreated({ ...event, type, data: payload } as OpenCodeEvent, created)
+  const mapped = mappedSessionType(type)
+  return withCreated({ ...event, type: mapped, data: reshapeSessionData(mapped, payload) }, created)
+}
+
 export function createV2SessionReducer() {
   const pending = new Map<string, SessionPendingMessage>()
+  const ordinals = new Map<string, number>()
 
-  const reduce = (source: readonly SessionMessageInfo[], event: OpenCodeEvent): V2SessionReduction | undefined => {
+  const reduce = (source: readonly SessionMessageInfo[], raw: OpenCodeEvent): V2SessionReduction | undefined => {
+    const event = withFragmentOrdinal(ordinals, currentV2Event(raw))
     if (!("data" in event) || !("sessionID" in event.data) || typeof event.data.sessionID !== "string") return
     const sessionID = event.data.sessionID
     const result = (messages: SessionMessageInfo[], touched: string[] = []): V2SessionReduction => ({
@@ -30,7 +44,7 @@ export function createV2SessionReducer() {
         pending.set(key(sessionID, event.data.inputID), event.data.input)
         return result([...source])
       case "session.input.promoted": {
-        const input = pending.get(key(sessionID, event.data.inputID))
+        const input = pending.get(key(sessionID, event.data.inputID)) ?? promotedInput(event.data)
         pending.delete(key(sessionID, event.data.inputID))
         if (!input) return { ...result([...source]), missing: event.data.inputID }
         if (input.type === "user")
@@ -418,6 +432,112 @@ export function createV2SessionReducer() {
 
 function key(sessionID: string, inputID: string) {
   return `${sessionID}:${inputID}`
+}
+
+function mappedSessionType(type: string) {
+  const current = type.replace(/\.\d+$/, "")
+  if (current === "session.next.prompt.admitted") return "session.input.admitted"
+  if (current === "session.next.prompted") return "session.input.promoted"
+  if (current === "session.next.agent.switched") return "session.agent.selected"
+  if (current === "session.next.model.switched") return "session.model.selected"
+  return current.replace(/^session\.next\./, "session.")
+}
+
+function eventPayload(event: OpenCodeEvent) {
+  if ("data" in event && event.data && typeof event.data === "object") return { ...(event.data as EventData) }
+  if (!("properties" in event)) return
+  const properties = record((event as { properties?: unknown }).properties)
+  if (properties) return { ...properties }
+}
+
+function reshapeSessionData(type: string, data: EventData): EventData {
+  const provider = record(data.provider)
+  if (type === "session.input.admitted") {
+    return {
+      ...data,
+      inputID: data.inputID ?? data.messageID,
+      input:
+        data.input ??
+        (record(data.prompt)
+          ? {
+              type: "user",
+              delivery: data.delivery === "queue" ? "queue" : "steer",
+              data: data.prompt,
+            }
+          : undefined),
+    }
+  }
+  if (type === "session.input.promoted") return { ...data, inputID: data.inputID ?? data.messageID }
+  if (type === "session.moved") return { ...data, subpath: data.subpath ?? data.subdirectory }
+  if (type === "session.compaction.started") return { ...data, inputID: data.inputID ?? data.messageID }
+  if (type === "session.tool.called") {
+    return {
+      ...data,
+      name: data.name ?? data.tool,
+      executed: data.executed ?? provider?.executed,
+      state: data.state ?? provider?.metadata,
+    }
+  }
+  if (type === "session.tool.progress") return { ...data, metadata: data.metadata ?? data.structured }
+  if (type === "session.tool.success" || type === "session.tool.failed") {
+    return {
+      ...data,
+      executed: data.executed ?? provider?.executed,
+      resultState: data.resultState ?? provider?.metadata,
+      metadata: data.metadata ?? data.structured,
+    }
+  }
+  return data
+}
+
+function promotedInput(data: { prompt?: { text?: string }; delivery?: string; input?: SessionPendingMessage }) {
+  if (data.input) return data.input
+  if (!data.prompt || typeof data.prompt.text !== "string") return
+  return {
+    type: "user" as const,
+    delivery: data.delivery === "queue" ? ("queue" as const) : ("steer" as const),
+    data: data.prompt,
+  }
+}
+
+function withFragmentOrdinal(ordinals: Map<string, number>, event: OpenCodeEvent): OpenCodeEvent {
+  if (!("data" in event) || !event.data || typeof event.data !== "object") return event
+  if (
+    event.type !== "session.text.started" &&
+    event.type !== "session.text.delta" &&
+    event.type !== "session.text.ended" &&
+    event.type !== "session.reasoning.started" &&
+    event.type !== "session.reasoning.delta" &&
+    event.type !== "session.reasoning.ended"
+  )
+    return event
+  const data = event.data as EventData
+  if (typeof data.ordinal === "number") return event
+  const kind = event.type.startsWith("session.text.") ? "text" : "reasoning"
+  const id = kind === "text" ? data.textID : data.reasoningID
+  if (typeof id !== "string" || typeof data.assistantMessageID !== "string") return event
+  const key = `${data.assistantMessageID}:${kind}:${id}`
+  const existing = ordinals.get(key)
+  const ordinal =
+    existing ??
+    [...ordinals.keys()].filter((item) => item.startsWith(`${data.assistantMessageID}:${kind}:`)).length
+  if (existing === undefined) ordinals.set(key, ordinal)
+  return { ...event, data: { ...data, ordinal } } as OpenCodeEvent
+}
+
+function eventCreated(event: OpenCodeEvent, data: EventData) {
+  if ("created" in event && typeof event.created === "number") return event.created
+  if (typeof data.timestamp === "number") return data.timestamp
+  return Date.now()
+}
+
+function withCreated(event: OpenCodeEvent, created: number): OpenCodeEvent {
+  return { ...event, created } as OpenCodeEvent
+}
+
+function record(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return
+  return value as EventData
 }
 
 function messageID(eventID: string) {

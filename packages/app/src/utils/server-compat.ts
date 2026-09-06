@@ -46,9 +46,11 @@ type LegacyPrompt = {
   legacyParts?: (TextPartInput | FilePartInput | AgentPartInput)[]
 }
 type LegacyLocation = { directory?: string }
+type V2Client = ReturnType<(typeof import("./server"))["createSdkForServer"]>
 type CompatibleInput = {
   protocol: Promise<ServerProtocol>
   current: ServerApi
+  next?: V2Client
   legacy: LegacyFor
   directory?: string
 }
@@ -83,11 +85,219 @@ function sessionInfo(session: Session): SessionInfo {
   }
 }
 
+function mentionSource(mention?: { text: string; start: number; end: number }) {
+  if (!mention) return
+  return { start: mention.start, end: mention.end, text: mention.text }
+}
+
+function v2Prompt(value: SessionPromptInput & LegacyPrompt) {
+  const nested = nestedPrompt(value)
+  if (nested) return nested
+  return {
+    text: value.text,
+    files: value.files?.map((file) => ({
+      uri: file.uri,
+      name: file.name,
+      source: mentionSource(file.mention),
+    })),
+    agents: value.agents?.map((agent) => ({
+      name: agent.name,
+      source: mentionSource(agent.mention),
+    })),
+  }
+}
+
+function nestedPrompt(value: SessionPromptInput & LegacyPrompt) {
+  if (!("prompt" in value)) return
+  const prompt = value.prompt
+  if (!prompt || typeof prompt !== "object" || !("text" in prompt)) return
+  if (typeof prompt.text !== "string") return
+  return {
+    text: prompt.text,
+    files: "files" in prompt && Array.isArray(prompt.files) ? prompt.files : undefined,
+    agents: "agents" in prompt && Array.isArray(prompt.agents) ? prompt.agents : undefined,
+  }
+}
+
+function v1Parts(value: SessionPromptInput & LegacyPrompt) {
+  if (value.legacyParts) return value.legacyParts
+  const prompt = v2Prompt(value)
+  return [
+    ...(prompt.text ? [{ type: "text" as const, text: prompt.text }] : []),
+    ...(prompt.files ?? []).map((file) => ({
+      type: "file" as const,
+      mime: mime(file.uri),
+      url: file.uri,
+      filename: file.name,
+    })),
+    ...(prompt.agents ?? []).map((agent) => ({
+      type: "agent" as const,
+      name: agent.name,
+    })),
+  ]
+}
+
+function admitted(value: SessionPromptInput & LegacyPrompt, text: string): SessionPromptOutput {
+  return {
+    admittedSeq: 0,
+    id: value.id ?? "",
+    sessionID: value.sessionID,
+    timeCreated: Date.now(),
+    type: "user",
+    data: { text },
+    delivery: value.delivery === "queue" ? "queue" : "steer",
+  }
+}
+
+async function promptV1(input: CompatibleInput, value: SessionPromptInput & LegacyPrompt): Promise<SessionPromptOutput> {
+  const prompt = v2Prompt(value)
+  await input.legacy().session.promptAsync({
+    sessionID: value.sessionID,
+    messageID: value.id ?? undefined,
+    agent: value.agent,
+    model: value.model,
+    variant: value.variant,
+    parts: v1Parts(value),
+  })
+  return admitted(value, prompt.text)
+}
+
+async function promptV2(input: CompatibleInput, value: SessionPromptInput & LegacyPrompt): Promise<SessionPromptOutput> {
+  const prompt = v2Prompt(value)
+  if (value.agent) await input.current.session.switchAgent({ sessionID: value.sessionID, agent: value.agent })
+  if (value.model) {
+    await input.current.session.switchModel({
+      sessionID: value.sessionID,
+      model: {
+        id: value.model.modelID,
+        providerID: value.model.providerID,
+        variant: value.variant,
+      },
+    })
+  }
+  if (input.next) {
+    await input.next.v2.session.prompt({
+      sessionID: value.sessionID,
+      id: value.id ?? undefined,
+      prompt,
+      delivery: value.delivery ?? undefined,
+      resume: value.resume ?? undefined,
+    })
+    return admitted(value, prompt.text)
+  }
+  return input.current.session.prompt({
+    sessionID: value.sessionID,
+    id: value.id,
+    text: prompt.text,
+    files: value.files,
+    agents: value.agents,
+    delivery: value.delivery,
+    resume: value.resume,
+  })
+}
+
+// Mixed servers still advertise V1 health, but session prompts already run on V2.
+// Replies must hit the V2 pending map or Allow always 404s with "request not found".
+function permissionReply(
+  input: CompatibleInput,
+  value: Parameters<ServerApi["permission"]["reply"]>[0] & { location?: { directory?: string } },
+) {
+  return input.current.permission.reply({
+    sessionID: value.sessionID,
+    requestID: value.requestID,
+    reply: value.reply,
+    message: value.message,
+  })
+}
+
+function compactV2(input: CompatibleInput, value: SessionCompactInput & { model?: LegacyPrompt["model"] }) {
+  return input.current.session.compact({ sessionID: value.sessionID }).then(() => ({
+    admittedSeq: 0,
+    id: value.id ?? "",
+    sessionID: value.sessionID,
+    timeCreated: Date.now(),
+    type: "compaction" as const,
+  }))
+}
+
+const commandArg = /(?:\[Image\s+\d+\]|"[^"]*"|'[^']*'|[^\s"']+)/gi
+const commandPlaceholder = /\$(\d+)/g
+
+function expandCommandTemplate(template: string, argumentsText: string) {
+  const args = (argumentsText.match(commandArg) ?? []).map((arg) => arg.replace(/^["']|["']$/g, ""))
+  const placeholders = template.match(commandPlaceholder) ?? []
+  const last = placeholders.reduce((max, item) => Math.max(max, Number(item.slice(1))), 0)
+  const withArgs = template.replaceAll(commandPlaceholder, (_, index) => {
+    const position = Number(index)
+    const argIndex = position - 1
+    if (argIndex >= args.length) return ""
+    if (position === last) return args.slice(argIndex).join(" ")
+    return args[argIndex]
+  })
+  const expanded = withArgs.replaceAll("$ARGUMENTS", argumentsText)
+  if (placeholders.length === 0 && !template.includes("$ARGUMENTS") && argumentsText.trim()) {
+    return `${expanded}\n\n${argumentsText}`.trim()
+  }
+  return expanded.trim()
+}
+
+async function commandV2(input: CompatibleInput, value: SessionCommandInput): Promise<SessionCommandOutput> {
+  const listed = await input.current.command.list({ location: { directory: input.directory } })
+  const cmd = listed.data.find((item) => item.name === value.command)
+  if (!cmd) throw new Error(`Command not found: "${value.command}"`)
+  return promptV2(input, {
+    sessionID: value.sessionID,
+    id: value.id,
+    text: expandCommandTemplate(cmd.template, value.arguments ?? ""),
+    files: value.files,
+    agent: cmd.agent ?? value.agent,
+    model: cmd.model
+      ? { providerID: cmd.model.providerID, modelID: cmd.model.id }
+      : value.model
+        ? { providerID: value.model.providerID, modelID: value.model.id }
+        : undefined,
+    variant: value.model?.variant ?? cmd.model?.variant,
+    delivery: value.delivery,
+  })
+}
+
+// Mixed desktop servers advertise V1 via /global/health while prompts run on V2.
+// Any GUI action that mutates V2 runner or pending V2 maps must stay on current.
+// session.shell has no V2 executor yet (OperationUnavailable), so it remains V1.
+function withV2Prompt(api: ServerApi | CompatibleApi, input: CompatibleInput): CompatibleApi {
+  return {
+    ...api,
+    session: {
+      ...api.session,
+      prompt: (value: SessionPromptInput & LegacyPrompt) => promptV2(input, value),
+      command: (value) => commandV2(input, value),
+      compact: (value) => compactV2(input, value),
+      active: () => input.current.session.active(),
+      revert: {
+        ...api.session.revert,
+        stage: (value) => input.current.session.revert.stage(value),
+        clear: (value) => input.current.session.revert.clear(value),
+        commit: (value) => input.current.session.revert.commit(value),
+      },
+    },
+    permission: {
+      ...api.permission,
+      reply: (value) => permissionReply(input, value),
+    },
+    question: {
+      ...api.question,
+      reply: (value) => input.current.question.reply(value),
+      reject: (value) => input.current.question.reject(value),
+    },
+  }
+}
+
 export function createCompatibleApi(input: CompatibleInput): CompatibleApi {
   const v1 = createV1Api(input)
+  const v2 = withV2Prompt(input.current, input)
   return lazyApi(
-    input.protocol.then((protocol) => (protocol === "v1" ? v1 : input.current)),
-    input.current,
+    input.protocol.then((protocol) => (protocol === "v1" ? withV2Prompt(v1, input) : v2)),
+    v2,
   )
 }
 
@@ -173,12 +383,7 @@ function createV1Api(input: CompatibleInput): CompatibleApi {
         return sessionInfo(result.data)
       },
       async active() {
-        const result = await legacy().session.status()
-        return Object.fromEntries(
-          Object.entries(result.data ?? {}).flatMap(([sessionID, status]) =>
-            status.type === "idle" ? [] : [[sessionID, { type: "running" as const }]],
-          ),
-        )
+        return input.current.session.active()
       },
       async rename(value: Parameters<ServerApi["session"]["rename"]>[0] & LegacyLocation) {
         await legacy(value).session.update({ sessionID: value.sessionID, title: value.title })
@@ -195,74 +400,21 @@ function createV1Api(input: CompatibleInput): CompatibleApi {
         return sessionInfo(result.data)
       },
       async interrupt(value: Parameters<ServerApi["session"]["interrupt"]>[0]) {
-        await legacy().session.abort(value)
+        const abort = legacy().session.abort(value)
+        if (!input.next) {
+          await abort
+          return
+        }
+        await Promise.all([
+          input.next.v2.session.interrupt({ sessionID: value.sessionID }).catch(() => undefined),
+          abort,
+        ])
       },
       async prompt(value: SessionPromptInput & LegacyPrompt) {
-        await legacy().session.promptAsync({
-          sessionID: value.sessionID,
-          messageID: value.id ?? undefined,
-          agent: value.agent,
-          model: value.model,
-          variant: value.variant,
-          parts: value.legacyParts ?? [
-            { type: "text", text: value.text },
-            ...(value.files ?? []).map((file) => ({
-              type: "file" as const,
-              mime: file.mention ? "text/plain" : mime(file.uri),
-              url: file.uri,
-              filename: file.name,
-              source: file.mention
-                ? {
-                    type: "file" as const,
-                    text: { value: file.mention.text, start: file.mention.start, end: file.mention.end },
-                    path: file.uri,
-                  }
-                : undefined,
-            })),
-            ...(value.agents ?? []).map((agent) => ({
-              type: "agent" as const,
-              name: agent.name,
-              source: agent.mention
-                ? { value: agent.mention.text, start: agent.mention.start, end: agent.mention.end }
-                : undefined,
-            })),
-          ],
-        })
-        return {
-          admittedSeq: 0,
-          id: value.id ?? "",
-          sessionID: value.sessionID,
-          timeCreated: Date.now(),
-          type: "user",
-          data: { text: value.text },
-          delivery: value.delivery ?? "steer",
-        }
+        return promptV1(input, value)
       },
       async command(value: SessionCommandInput) {
-        await legacy().session.command({
-          sessionID: value.sessionID,
-          messageID: value.id ?? undefined,
-          command: value.command,
-          arguments: value.arguments ?? "",
-          agent: value.agent ?? undefined,
-          model: value.model ? `${value.model.providerID}/${value.model.id}` : undefined,
-          variant: value.model?.variant,
-          parts: value.files?.map((file) => ({
-            type: "file" as const,
-            mime: mime(file.uri),
-            url: file.uri,
-            filename: file.name,
-          })),
-        })
-        return {
-          admittedSeq: 0,
-          id: value.id ?? "",
-          sessionID: value.sessionID,
-          timeCreated: Date.now(),
-          type: "user",
-          data: { text: `/${value.command} ${value.arguments ?? ""}`.trim() },
-          delivery: value.delivery ?? "steer",
-        }
+        return commandV2(input, value)
       },
       async shell(value: SessionShellInput & LegacyPrompt) {
         await legacy().session.shell({
@@ -272,30 +424,14 @@ function createV1Api(input: CompatibleInput): CompatibleApi {
           model: value.model,
         })
       },
-      compact: async (value: SessionCompactInput & { model?: LegacyPrompt["model"] }) => {
-        if (!value.model) throw new Error("A model is required to compact a V1 session")
-        await legacy().session.summarize({
-          sessionID: value.sessionID,
-          providerID: value.model.providerID,
-          modelID: value.model.modelID,
-        })
-        return {
-          admittedSeq: 0,
-          id: value.id ?? "",
-          sessionID: value.sessionID,
-          timeCreated: Date.now(),
-          type: "compaction",
-        }
-      },
+      compact: (value: SessionCompactInput & { model?: LegacyPrompt["model"] }) => compactV2(input, value),
       revert: {
-        stage: async (value: Parameters<ServerApi["session"]["revert"]["stage"]>[0]) => {
-          await legacy().session.revert(value)
-          return { messageID: value.messageID }
-        },
-        clear: async (value: Parameters<ServerApi["session"]["revert"]["clear"]>[0]) => {
-          await legacy().session.unrevert(value)
-        },
-        commit: input.current.session.revert.commit,
+        stage: (value: Parameters<ServerApi["session"]["revert"]["stage"]>[0]) =>
+          input.current.session.revert.stage(value),
+        clear: (value: Parameters<ServerApi["session"]["revert"]["clear"]>[0]) =>
+          input.current.session.revert.clear(value),
+        commit: (value: Parameters<ServerApi["session"]["revert"]["commit"]>[0]) =>
+          input.current.session.revert.commit(value),
       },
     },
     project: {
@@ -401,6 +537,7 @@ function createV1Api(input: CompatibleInput): CompatibleApi {
             providerID: value.integrationID,
             auth: { type: "api", key: value.key },
           })
+          await input.current.integration.connect.key(value).catch(() => undefined)
           await legacy(value.location).instance.dispose()
           await input.legacy().instance.dispose()
         },
@@ -493,26 +630,12 @@ function createV1Api(input: CompatibleInput): CompatibleApi {
     },
     permission: {
       ...input.current.permission,
-      async reply(value: Parameters<ServerApi["permission"]["reply"]>[0] & { location?: { directory?: string } }) {
-        await legacy(value.location).permission.respond({
-          sessionID: value.sessionID,
-          permissionID: value.requestID,
-          response: value.reply,
-          directory: directory(value.location),
-        })
-      },
+      reply: (value) => permissionReply(input, value),
     },
     question: {
       ...input.current.question,
-      async reply(value: Parameters<ServerApi["question"]["reply"]>[0]) {
-        await legacy().question.reply({
-          requestID: value.requestID,
-          answers: value.answers.map((answer) => [...answer]),
-        })
-      },
-      async reject(value: Parameters<ServerApi["question"]["reject"]>[0]) {
-        await legacy().question.reject({ requestID: value.requestID })
-      },
+      reply: (value) => input.current.question.reply(value),
+      reject: (value) => input.current.question.reject(value),
     },
   }
 }

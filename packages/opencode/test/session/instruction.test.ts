@@ -261,4 +261,24 @@ describe("Instruction.systemPaths global config", () => {
       }).pipe(provideInstance(projectTmp), provideInstruction({ home: globalTmp, config: globalTmp }))
     }),
   )
+
+  it.live("loads global rules files after project AGENTS.md", () =>
+    Effect.gen(function* () {
+      const globalTmp = yield* tmpWithFiles({
+        "AGENTS.md": "# Global Instructions",
+        "rules/01-user.md": "never use dotnet build",
+      })
+      const projectTmp = yield* tmpWithFiles({ "AGENTS.md": "# Project Instructions" })
+
+      yield* Effect.gen(function* () {
+        const svc = yield* Instruction.Service
+        const rules = yield* svc.system()
+        expect(rules).toEqual([
+          `Instructions from: ${path.join(globalTmp, "AGENTS.md")}\n# Global Instructions`,
+          `Instructions from: ${path.join(projectTmp, "AGENTS.md")}\n# Project Instructions`,
+          `Instructions from: ${path.join(globalTmp, "rules", "01-user.md")}\nnever use dotnet build`,
+        ])
+      }).pipe(provideInstance(projectTmp), provideInstruction({ home: globalTmp, config: globalTmp }))
+    }),
+  )
 })

@@ -71,6 +71,7 @@ import {
   SessionComposerRegion,
 } from "@/pages/session/composer"
 import { createOpenReviewFile, createSessionTabs, createSizing, shouldShowFileTree } from "@/pages/session/helpers"
+import { createFileMutationTracker } from "@/context/file/mutation-events"
 import { MessageTimeline } from "@/pages/session/timeline/message-timeline"
 import { createTimelineModel } from "@/pages/session/timeline/model"
 import { type DiffStyle, SessionReviewTab, type SessionReviewTabProps } from "@/pages/session/review-tab"
@@ -700,6 +701,7 @@ export default function Page() {
     }
   })
   const refreshVcs = debounce(() => void queryClient.invalidateQueries({ queryKey: vcsKey() }), 100)
+  const vcsRefresh = createFileMutationTracker()
   const reviewDiffs = () => {
     if (reviewMode() === "git" || reviewMode() === "branch")
       // avoids suspense
@@ -949,15 +951,8 @@ export default function Page() {
     ),
   )
 
-  const stopVcs = sdk().event.listen((evt) => {
-    const details = evt.details as { type: string; properties?: unknown }
-    if (details.type !== "file.watcher.updated" && details.type !== "filesystem.changed") return
-    const props =
-      typeof details.properties === "object" && details.properties
-        ? (details.properties as Record<string, unknown>)
-        : undefined
-    const file = typeof props?.file === "string" ? props.file : undefined
-    if (!file || file.startsWith(".git/")) return
+  const stopVcs = serverSDK().event.listen((evt) => {
+    if (!vcsRefresh.shouldRefresh(evt, params.id)) return
     refreshVcs()
   })
   onCleanup(stopVcs)
@@ -1817,12 +1812,13 @@ export default function Page() {
     setFollowup("edit", id, undefined)
   }
 
-  const halt = (sessionID: string) =>
-    busy(sessionID)
-      ? sdk()
-          .api.session.interrupt({ sessionID })
-          .catch(() => {})
-      : Promise.resolve()
+  const halt = (sessionID: string) => {
+    if (!busy(sessionID)) return Promise.resolve()
+    serverSync().session.set("session_status", sessionID, { type: "idle" })
+    return sdk()
+      .api.session.interrupt({ sessionID })
+      .catch(() => {})
+  }
 
   const revertMutation = useMutation(() => ({
     mutationFn: async (input: { sessionID: string; messageID: string }) => {

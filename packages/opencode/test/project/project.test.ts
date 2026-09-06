@@ -9,6 +9,7 @@ import { ProjectTable } from "@opencode-ai/core/project/sql"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { WorkspaceTable } from "@opencode-ai/core/control-plane/workspace.sql"
 import { eq } from "drizzle-orm"
+import { AbsolutePath } from "@opencode-ai/core/schema"
 import { Hash } from "@opencode-ai/core/util/hash"
 import { SessionID } from "@/session/schema"
 import { WorkspaceV2 } from "@opencode-ai/core/workspace"
@@ -394,6 +395,29 @@ describe("Project.fromDirectory with worktrees", () => {
       expect(result.project.worktree).toBe(worktree1)
       expect(result.project.sandboxes).toContain(worktree2)
       expect(result.project.sandboxes).not.toContain(tmp)
+    }),
+  )
+
+  it.live("adopts the opened directory when the stored worktree is gone", () =>
+    Effect.gen(function* () {
+      const project = yield* Project.Service
+      const tmp = yield* tmpdirScoped({ git: true })
+      const result = yield* project.fromDirectory(tmp)
+      yield* project.update({ projectID: result.project.id, name: "Custom Name" })
+
+      const { db } = yield* Database.Service
+      yield* db
+        .update(ProjectTable)
+        .set({ worktree: AbsolutePath.make(tmp + "-moved") })
+        .where(eq(ProjectTable.id, result.project.id))
+        .run()
+        .pipe(Effect.orDie)
+
+      const next = yield* project.fromDirectory(tmp)
+      expect(next.project.id).toBe(result.project.id)
+      expect(next.project.worktree).toBe(tmp)
+      expect(next.project.name).toBe("Custom Name")
+      expect(next.project.sandboxes).not.toContain(tmp)
     }),
   )
 })

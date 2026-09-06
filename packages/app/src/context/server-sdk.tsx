@@ -205,7 +205,9 @@ function createServerSdkContextBase(server: ServerConnection.Any, scope: ServerS
     fetch: eventFetch,
     server: server.http,
   })
-  const protocol = detectServerProtocol(server.http, platform.fetch ?? globalThis.fetch)
+  const protocol = detectServerProtocol(server.http, platform.fetch ?? globalThis.fetch, {
+    platform: platform.platform,
+  })
   const [protocolKind] = createResource(
     () => protocol,
     (value) => value,
@@ -273,10 +275,12 @@ function createServerSdkContextBase(server: ServerConnection.Any, scope: ServerS
         abort.signal.addEventListener("abort", onAbort)
         try {
           const kind = await protocol
+          // Desktop sidecars still answer /global/health, but Cursor prompts admit on V2.
+          // Subscribe to /api/event so session.next.* and session.status reach the GUI.
           const events =
-            kind === "v1"
-              ? (await eventSdk.global.event({ signal: attempt.signal })).stream
-              : eventApi.event.subscribe({ signal: attempt.signal })
+            platform.platform === "desktop" || kind === "v2"
+              ? eventApi.event.subscribe({ signal: attempt.signal })
+              : (await eventSdk.global.event({ signal: attempt.signal })).stream
           let yielded = Date.now()
           for await (const event of events) {
             streamErrorLogged = false
@@ -346,7 +350,7 @@ function createServerSdkContextBase(server: ServerConnection.Any, scope: ServerS
       throwOnError: true,
       directory,
     })
-  const api = createCompatibleApi({ protocol, current: currentApi, legacy })
+  const api = createCompatibleApi({ protocol, current: currentApi, next: sdk, legacy })
 
   return {
     server,
@@ -430,6 +434,7 @@ function createDirSdkContext(directory: string, serverSDK: ServerSDKBase) {
     api: createCompatibleApi({
       protocol: serverSDK.protocol,
       current: serverSDK.currentApi,
+      next: client,
       legacy: (next) => serverSDK.createClient({ directory: next ?? directory, throwOnError: true }),
       directory,
     }),

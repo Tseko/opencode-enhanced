@@ -11,6 +11,7 @@ import { Flag } from "@opencode-ai/core/flag/flag"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { withTransientReadRetry } from "@/util/effect-http-client"
 import { Global } from "@opencode-ai/core/global"
+import { InstructionRule } from "@opencode-ai/core/instruction-rule"
 import type { MessageV2 } from "./message-v2"
 import type { MessageID } from "./schema"
 
@@ -149,6 +150,20 @@ const layer: Layer.Layer<
         }
       }
 
+      const signals = InstructionRule.fromPaths([ctx.directory, ctx.worktree])
+      const rules = yield* fs
+        .glob("*.{md,mdc}", {
+          cwd: path.join(global.config, "rules"),
+          absolute: true,
+          include: "file",
+        })
+        .pipe(Effect.catch(() => Effect.succeed([] as string[])))
+      for (const item of rules.toSorted()) {
+        const content = yield* read(item)
+        if (!InstructionRule.applies(InstructionRule.parse(content).spec, signals)) continue
+        paths.add(path.resolve(item))
+      }
+
       return paths
     })
 
@@ -162,8 +177,14 @@ const layer: Layer.Layer<
       const files = yield* Effect.forEach(Array.from(paths), read, { concurrency: 8 })
       const remote = yield* Effect.forEach(urls, fetch, { concurrency: 4 })
 
+      const ruleDir = path.join(global.config, "rules")
       return [
-        ...Array.from(paths).flatMap((item, i) => (files[i] ? [`Instructions from: ${item}\n${files[i]}`] : [])),
+        ...Array.from(paths).flatMap((item, i) => {
+          if (!files[i]) return []
+          const content =
+            path.resolve(path.dirname(item)) === path.resolve(ruleDir) ? InstructionRule.parse(files[i]).body : files[i]
+          return [`Instructions from: ${item}\n${content}`]
+        }),
         ...urls.flatMap((item, i) => (remote[i] ? [`Instructions from: ${item}\n${remote[i]}`] : [])),
       ]
     })

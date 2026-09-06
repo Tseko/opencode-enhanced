@@ -41,6 +41,7 @@ already-loaded config until then.
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | Project config                | `./opencode.json`, `./opencode.jsonc`, or `.opencode/opencode.json` (opencode walks up from the cwd to the worktree root) |
 | Global config                 | `~/.config/opencode/opencode.json` or `~/.config/opencode/opencode.jsonc` (NOT `~/.opencode/`)                            |
+| Global user rules             | `~/.config/opencode/rules/*.md` or `*.mdc` (host-selected: `alwaysApply`, `globs`, `match`; after `AGENTS.md`)           |
 | Project agents                | `.opencode/agent/<name>.md` or `.opencode/agents/<name>.md`                                                               |
 | Global agents                 | `~/.config/opencode/agent(s)/<name>.md`                                                                                   |
 | Project commands              | `.opencode/command/<name>.md` or `.opencode/commands/<name>.md`                                                           |
@@ -51,6 +52,20 @@ already-loaded config until then.
 
 Configs from each scope are deep-merged. Project overrides global. Unknown
 top-level keys in `opencode.json` are rejected with `ConfigInvalidError`.
+
+Global user rules are selected by the host, not by the model. Files without
+frontmatter always apply. With frontmatter:
+
+```markdown
+---
+alwaysApply: true
+---
+```
+
+always applies. `alwaysApply: false` plus `globs` and/or `match` applies when
+the workspace path, the current prompt, attached files, or already-used tool
+paths hit those patterns. Description-only Cursor rules (no globs/match) still
+always apply so they cannot be skipped by the model.
 
 ## opencode.json
 

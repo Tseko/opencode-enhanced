@@ -5,7 +5,14 @@ import type {
   ModelListOutput,
   ProviderListOutput,
 } from "@opencode-ai/client/promise"
-import { directoryKey, normalizeAgentList, normalizePermissionRequest, normalizeProviderList } from "./utils"
+import {
+  directoryKey,
+  enrichOpenProject,
+  matchProjectInfo,
+  normalizeAgentList,
+  normalizePermissionRequest,
+  normalizeProviderList,
+} from "./utils"
 
 describe("normalizeAgentList", () => {
   test("adapts current agents to the app agent shape", () => {
@@ -37,6 +44,37 @@ describe("normalizeAgentList", () => {
         variant: "high",
         prompt: "Build software",
         options: { temperature: 0.2, topP: 0.9 },
+        steps: undefined,
+      },
+    ])
+  })
+
+  test("accepts current agents whose request has no settings", () => {
+    const result = normalizeAgentList([
+      {
+        id: "build",
+        name: "Build",
+        mode: "primary",
+        hidden: false,
+        request: { headers: {}, body: {} },
+        permissions: [],
+      },
+    ] as AgentListOutput["data"])
+
+    expect(result).toEqual([
+      {
+        name: "build",
+        description: undefined,
+        mode: "primary",
+        hidden: false,
+        temperature: undefined,
+        topP: undefined,
+        color: undefined,
+        permission: [],
+        model: undefined,
+        variant: undefined,
+        prompt: undefined,
+        options: {},
         steps: undefined,
       },
     ])
@@ -134,5 +172,55 @@ describe("directoryKey", () => {
     expect(String(directoryKey("C:/Repos/sst/opencode/"))).toBe("C:/Repos/sst/opencode")
     expect(String(directoryKey("C:/"))).toBe("C:/")
     expect(String(directoryKey("/"))).toBe("/")
+  })
+})
+
+describe("matchProjectInfo", () => {
+  const projects = [
+    {
+      id: "proj-1",
+      worktree: "C:/Repos/app",
+      sandboxes: ["C:/Repos/app-wt"],
+      time: { created: 0, updated: 0 },
+    },
+  ]
+
+  test("matches worktree paths with either slash style", () => {
+    expect(matchProjectInfo(projects, { worktree: "C:\\Repos\\app" })?.id).toBe("proj-1")
+  })
+
+  test("matches sandbox directories", () => {
+    expect(matchProjectInfo(projects, { worktree: "C:/Repos/app-wt" })?.id).toBe("proj-1")
+  })
+})
+
+describe("enrichOpenProject", () => {
+  const projects = [
+    {
+      id: "proj-1",
+      worktree: "C:/Repos/app",
+      name: "Server Name",
+      time: { created: 0, updated: 0 },
+      sandboxes: [],
+    },
+  ]
+
+  test("uses persisted local name over server metadata", () => {
+    const result = enrichOpenProject(
+      { worktree: "C:\\Repos\\app", expanded: true },
+      { project: "", projectMeta: { name: "Local Name" } },
+      projects,
+    )
+    expect(result.name).toBe("Local Name")
+    expect(result.id).toBe("proj-1")
+  })
+
+  test("keeps an explicit empty name so the folder name can show", () => {
+    const result = enrichOpenProject(
+      { worktree: "C:/Repos/app", expanded: false },
+      { project: "proj-1", projectMeta: { name: "" } },
+      projects,
+    )
+    expect(result.name).toBe("")
   })
 })

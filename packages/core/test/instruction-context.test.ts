@@ -7,6 +7,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Global } from "@opencode-ai/core/global"
 import { InstructionContext } from "@opencode-ai/core/instruction-context"
+import { InstructionRule } from "@opencode-ai/core/instruction-rule"
 import { Location } from "@opencode-ai/core/location"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { SystemContext } from "@opencode-ai/core/system-context"
@@ -104,6 +105,172 @@ describe("InstructionContext", () => {
             text: "Previously loaded instructions no longer apply.",
             snapshot: {},
           })
+        }),
+      ),
+    ),
+  )
+
+  it.live("loads global rules files after project AGENTS.md on every location", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          const global = path.join(tmp.path, "global")
+          const project = path.join(tmp.path, "project")
+          const globalFile = path.join(global, "AGENTS.md")
+          const projectFile = path.join(project, "AGENTS.md")
+          const ruleFile = path.join(global, "rules", "01-user.md")
+          yield* Effect.promise(async () => {
+            await fs.mkdir(path.join(global, "rules"), { recursive: true })
+            await fs.mkdir(project, { recursive: true })
+            await fs.writeFile(globalFile, "global")
+            await fs.writeFile(projectFile, "project")
+            await fs.writeFile(ruleFile, "never use dotnet build")
+          })
+
+          const context = yield* SystemContextRegistry.Service.pipe(
+            Effect.flatMap((service) => service.load()),
+            Effect.provide(
+              instructionLayer({
+                config: global,
+                locationServiceLayer: Layer.succeed(
+                  Location.Service,
+                  Location.Service.of(
+                    location(
+                      { directory: AbsolutePath.make(project) },
+                      { projectDirectory: AbsolutePath.make(project) },
+                    ),
+                  ),
+                ),
+              }),
+            ),
+          )
+
+          expect((yield* SystemContext.initialize(context)).baseline).toBe(
+            [
+              `Instructions from: ${globalFile}\nglobal`,
+              `Instructions from: ${projectFile}\nproject`,
+              `Instructions from: ${ruleFile}\nnever use dotnet build`,
+            ].join("\n\n"),
+          )
+        }),
+      ),
+    ),
+  )
+
+  it.live("skips glob and match rules until the location or session signals hit", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          const global = path.join(tmp.path, "global")
+          const project = path.join(tmp.path, "Telmetra")
+          const autrady = path.join(tmp.path, "Autrady")
+          const alwaysFile = path.join(global, "rules", "always.md")
+          const razorFile = path.join(global, "rules", "razor.md")
+          const autradyFile = path.join(global, "rules", "autrady.md")
+          yield* Effect.promise(async () => {
+            await fs.mkdir(path.join(global, "rules"), { recursive: true })
+            await fs.mkdir(project, { recursive: true })
+            await fs.mkdir(autrady, { recursive: true })
+            await fs.writeFile(
+              alwaysFile,
+              `---
+alwaysApply: true
+---
+always`,
+            )
+            await fs.writeFile(
+              razorFile,
+              `---
+alwaysApply: false
+globs: "**/*.cshtml"
+---
+razor`,
+            )
+            await fs.writeFile(
+              autradyFile,
+              `---
+alwaysApply: false
+match:
+  - autrady
+---
+autrady`,
+            )
+          })
+
+          const telmetra = yield* SystemContextRegistry.Service.pipe(
+            Effect.flatMap((service) => service.load()),
+            Effect.provide(
+              instructionLayer({
+                config: global,
+                locationServiceLayer: Layer.succeed(
+                  Location.Service,
+                  Location.Service.of(
+                    location(
+                      { directory: AbsolutePath.make(project) },
+                      { projectDirectory: AbsolutePath.make(project) },
+                    ),
+                  ),
+                ),
+              }),
+            ),
+          )
+          expect((yield* SystemContext.initialize(telmetra)).baseline).toContain(`Instructions from: ${alwaysFile}`)
+          expect((yield* SystemContext.initialize(telmetra)).baseline).not.toContain("razor")
+          expect((yield* SystemContext.initialize(telmetra)).baseline).not.toContain("autrady")
+
+          const autradyCtx = yield* SystemContextRegistry.Service.pipe(
+            Effect.flatMap((service) => service.load()),
+            Effect.provide(
+              instructionLayer({
+                config: global,
+                locationServiceLayer: Layer.succeed(
+                  Location.Service,
+                  Location.Service.of(
+                    location(
+                      { directory: AbsolutePath.make(autrady) },
+                      { projectDirectory: AbsolutePath.make(autrady) },
+                    ),
+                  ),
+                ),
+              }),
+            ),
+          )
+          expect((yield* SystemContext.initialize(autradyCtx)).baseline).toContain(
+            `Instructions from: ${autradyFile}\nautrady`,
+          )
+          expect((yield* SystemContext.initialize(autradyCtx)).baseline).not.toContain("razor")
+
+          const razorCtx = yield* SystemContextRegistry.Service.pipe(
+            Effect.flatMap((service) => service.load()),
+            Effect.provide(
+              instructionLayer({
+                config: global,
+                locationServiceLayer: Layer.succeed(
+                  Location.Service,
+                  Location.Service.of(
+                    location(
+                      { directory: AbsolutePath.make(project) },
+                      { projectDirectory: AbsolutePath.make(project) },
+                    ),
+                  ),
+                ),
+              }),
+            ),
+            Effect.provideService(
+              InstructionRule.SignalsService,
+              InstructionRule.SignalsService.of({
+                text: "",
+                paths: [path.join(project, "Views", "Home.cshtml")],
+              }),
+            ),
+          )
+          expect((yield* SystemContext.initialize(razorCtx)).baseline).toContain(`Instructions from: ${razorFile}`)
         }),
       ),
     ),

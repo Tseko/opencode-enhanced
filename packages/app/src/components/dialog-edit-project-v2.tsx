@@ -6,7 +6,7 @@ import { Icon } from "@opencode-ai/ui/v2/icon"
 import { ProjectAvatar, PROJECT_AVATAR_VARIANTS } from "@opencode-ai/ui/v2/project-avatar-v2"
 import { TextareaV2 } from "@opencode-ai/ui/v2/textarea-v2"
 import { TextInputV2 } from "@opencode-ai/ui/v2/text-input-v2"
-import { For, Show } from "solid-js"
+import { For, Show, createUniqueId } from "solid-js"
 import { useLanguage } from "@/context/language"
 import { getProjectAvatarVariant, type LocalProject } from "@/context/layout"
 import { ServerConnection } from "@/context/server"
@@ -16,10 +16,11 @@ import { createEditProjectModel } from "./edit-project"
 export function DialogEditProjectV2(props: { project: LocalProject; server: ServerConnection.Any }) {
   const language = useLanguage()
   const model = createEditProjectModel(props)
+  const formId = createUniqueId()
 
   return (
     <Dialog fit>
-      <form onSubmit={model.submit} class="contents">
+      <form id={formId} onSubmit={model.submit} class="contents">
         <DialogHeader>
           <DialogTitle>{language.t("dialog.project.edit.title")}</DialogTitle>
         </DialogHeader>
@@ -146,7 +147,7 @@ export function DialogEditProjectV2(props: { project: LocalProject; server: Serv
           <ButtonV2 type="button" variant="neutral" disabled={model.save.isPending} onClick={model.close}>
             {language.t("common.cancel")}
           </ButtonV2>
-          <ButtonV2 type="submit" variant="contrast" disabled={model.save.isPending}>
+          <ButtonV2 type="submit" form={formId} variant="contrast" disabled={model.save.isPending}>
             {model.save.isPending ? language.t("common.saving") : language.t("common.save")}
           </ButtonV2>
         </DialogFooter>

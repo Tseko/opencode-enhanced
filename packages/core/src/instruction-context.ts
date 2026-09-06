@@ -1,10 +1,11 @@
 export * as InstructionContext from "./instruction-context"
 
-import { Array, Effect, Layer, Schema } from "effect"
+import { Array, Effect, Layer, Option, Schema } from "effect"
 import { isAbsolute, join, relative, sep } from "path"
 import { FSUtil } from "./fs-util"
 import { Flag } from "./flag/flag"
 import { Global } from "./global"
+import { InstructionRule } from "./instruction-rule"
 import { Location } from "./location"
 import { AbsolutePath } from "./schema"
 import { SystemContext } from "./system-context/index"
@@ -55,7 +56,29 @@ const layer = Layer.effectDiscard(
           fs.resolve,
         ),
       )
-      const paths = Array.dedupe([yield* fs.resolve(join(global.config, "AGENTS.md")), ...discovered])
+      const rules = yield* fs
+        .glob("*.{md,mdc}", {
+          cwd: join(global.config, "rules"),
+          absolute: true,
+          include: "file",
+        })
+        .pipe(
+          Effect.catch(() => Effect.succeed([] as string[])),
+          Effect.flatMap((items) => Effect.forEach(items, fs.resolve)),
+        )
+      // Global AGENTS.md, then project files, then selected ~/.config/opencode/rules.
+      // alwaysApply (or untagged) rules always attach; globs/match attach from
+      // location paths plus optional session prompt/file signals.
+      const paths = Array.dedupe([
+        yield* fs.resolve(join(global.config, "AGENTS.md")),
+        ...discovered,
+        ...rules.toSorted(),
+      ])
+      const extra = Option.getOrUndefined(yield* Effect.serviceOption(InstructionRule.SignalsService))
+      const signals = InstructionRule.merge(
+        InstructionRule.fromPaths([location.directory, location.project.directory]),
+        extra,
+      )
       const files = yield* Effect.forEach(
         paths,
         (path) =>
@@ -70,7 +93,14 @@ const layer = Layer.effectDiscard(
       )
       if (files.some((file, index) => file === undefined && discovered.has(paths[index])))
         return SystemContext.unavailable
-      return files.filter((file): file is File => file !== undefined)
+      const ruleSet = new Set(rules)
+      return files.flatMap((file, index) => {
+        if (!file) return []
+        if (!ruleSet.has(paths[index])) return [file]
+        const parsed = InstructionRule.parse(file.content)
+        if (!InstructionRule.applies(parsed.spec, signals)) return []
+        return [new File({ path: file.path, content: parsed.body })]
+      })
     })
 
     yield* registry.register({

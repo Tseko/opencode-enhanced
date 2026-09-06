@@ -8,32 +8,36 @@ import type {
 import type { Agent, PermissionRequest, Project, Provider, ProviderListResponse } from "@opencode-ai/sdk/v2/client"
 import type { Project as CurrentProject } from "@opencode-ai/client/promise"
 import { NormalizedProviderListResponse } from "@opencode-ai/session-ui/context"
+import { pathKey } from "@/utils/path-key"
+import type { ProjectMeta } from "./types"
 export { pathKey as directoryKey, type PathKey as DirectoryKey } from "@/utils/path-key"
 
 export const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
 
 export function normalizeAgentList(input: AgentListOutput["data"] | Agent[]): Agent[] {
   if (input.every((agent) => !("request" in agent))) return input as Agent[]
-  return (input as AgentListOutput["data"]).map((agent) => ({
-    name: agent.id,
-    description: agent.description,
-    mode: agent.mode,
-    hidden: agent.hidden,
-    temperature:
-      typeof agent.request.settings.temperature === "number" ? agent.request.settings.temperature : undefined,
-    topP: typeof agent.request.settings.topP === "number" ? agent.request.settings.topP : undefined,
-    color: agent.color,
-    permission: agent.permissions.map((rule) => ({
-      permission: rule.action,
-      pattern: rule.resource,
-      action: rule.effect,
-    })),
-    model: agent.model && { providerID: agent.model.providerID, modelID: agent.model.id },
-    variant: agent.model?.variant,
-    prompt: agent.system,
-    options: agent.request.settings,
-    steps: agent.steps,
-  }))
+  return (input as AgentListOutput["data"]).map((agent) => {
+    const settings = agent.request.settings
+    return {
+      name: agent.id,
+      description: agent.description,
+      mode: agent.mode,
+      hidden: agent.hidden,
+      temperature: typeof settings?.temperature === "number" ? settings.temperature : undefined,
+      topP: typeof settings?.topP === "number" ? settings.topP : undefined,
+      color: agent.color,
+      permission: agent.permissions.map((rule) => ({
+        permission: rule.action,
+        pattern: rule.resource,
+        action: rule.effect,
+      })),
+      model: agent.model && { providerID: agent.model.providerID, modelID: agent.model.id },
+      variant: agent.model?.variant,
+      prompt: agent.system,
+      options: settings ?? {},
+      steps: agent.steps,
+    }
+  })
 }
 
 export function normalizePermissionRequest(input: PermissionV2Request | PermissionRequest): PermissionRequest {
@@ -169,4 +173,38 @@ export function normalizeProjectInfo(project: Project | CurrentProject): Project
     ...project,
     vcs: project.vcs === "git" ? "git" : undefined,
   }
+}
+
+export function matchProjectInfo(projects: Project[], input: { id?: string; worktree: string }) {
+  if (input.id) {
+    const byId = projects.find((project) => project.id === input.id)
+    if (byId) return byId
+  }
+  const key = pathKey(input.worktree)
+  return projects.find(
+    (project) =>
+      pathKey(project.worktree) === key || (project.sandboxes ?? []).some((sandbox) => pathKey(sandbox) === key),
+  )
+}
+
+export function projectPathKeys(project: { worktree: string; sandboxes?: readonly string[] }) {
+  return [pathKey(project.worktree), ...(project.sandboxes ?? []).map((sandbox) => pathKey(sandbox))]
+}
+
+export function enrichOpenProject(
+  project: { worktree: string; expanded: boolean },
+  child: { project: string; projectMeta?: ProjectMeta; icon?: string },
+  projects: Project[],
+) {
+  const metadata = matchProjectInfo(projects, { id: child.project, worktree: project.worktree })
+  const meta = child.projectMeta
+  const base = {
+    ...metadata,
+    ...project,
+    name: meta?.name !== undefined ? meta.name : metadata?.name,
+    commands: meta?.commands ? { ...metadata?.commands, ...meta.commands } : metadata?.commands,
+    icon: meta?.icon ? { ...metadata?.icon, ...meta.icon } : metadata?.icon,
+  }
+  if (!child.icon) return base
+  return { ...base, icon: { ...base.icon, override: child.icon } }
 }

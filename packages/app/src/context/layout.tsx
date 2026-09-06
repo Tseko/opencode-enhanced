@@ -8,7 +8,7 @@ import { useServerSDK } from "./server-sdk"
 import { RECENTLY_CLOSED_DISPLAY_LIMIT, ServerConnection, useServer } from "./server"
 import { usePlatform } from "./platform"
 import { Project } from "@opencode-ai/sdk/v2"
-import { normalizeProjectInfo } from "./global-sync/utils"
+import { normalizeProjectInfo, enrichOpenProject, projectPathKeys } from "./global-sync/utils"
 import { Persist, persisted, removePersisted } from "@/utils/persist"
 import { pathKey } from "@/utils/path-key"
 import { decode64 } from "@/utils/base64"
@@ -444,19 +444,7 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
 
     function enrich(project: { worktree: string; expanded: boolean }) {
       const [childStore] = serverSync().child(project.worktree, { bootstrap: false })
-      const projectID = childStore.project
-      const metadata = projectID
-        ? serverSync().data.project.find((x) => x.id === projectID)
-        : serverSync().data.project.find((x) => x.worktree === project.worktree)
-
-      // Preserve local icon override from per-workspace localStorage cache (childStore.icon).
-      // Without this, different subdirectories of the same git repo would share the same
-      // icon from the database instead of using their individual overrides.
-      const base = { ...metadata, ...project }
-      if (childStore.icon) {
-        return { ...base, icon: { ...base.icon, override: childStore.icon } }
-      }
-      return base
+      return enrichOpenProject(project, childStore, serverSync().data.project)
     }
 
     const roots = createMemo(() => {
@@ -464,7 +452,7 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
       for (const project of serverSync().data.project) {
         const sandboxes = project.sandboxes ?? []
         for (const sandbox of sandboxes) {
-          map.set(sandbox, project.worktree)
+          map.set(pathKey(sandbox), project.worktree)
         }
       }
       return map
@@ -481,11 +469,11 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
         const current = chain[chain.length - 1]
         if (!current) return directory
 
-        const next = map.get(current)
+        const next = map.get(pathKey(current))
         if (!next) return current
 
-        if (visited.has(next)) return directory
-        visited.add(next)
+        if (visited.has(pathKey(next))) return directory
+        visited.add(pathKey(next))
         chain.push(next)
       }
 
@@ -499,7 +487,7 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
       batch(() => {
         for (const project of projects) {
           const root = rootFor(project.worktree)
-          if (root === project.worktree) continue
+          if (pathKey(root) === pathKey(project.worktree)) continue
 
           server.projects.remove(project.worktree)
 
@@ -633,7 +621,7 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
       projects: {
         list,
         recentlyClosed: createMemo(() => {
-          const known = new Set(serverSync().data.project.map((project) => pathKey(project.worktree)))
+          const known = new Set(serverSync().data.project.flatMap(projectPathKeys))
           return server.projects
             .recentlyClosed()
             .filter((worktree) => known.has(pathKey(worktree)))
@@ -642,7 +630,7 @@ export const { use: useLayout, provider: LayoutProvider } = createSimpleContext(
         }),
         open(directory: string) {
           const root = rootFor(directory)
-          if (server.projects.list().find((x) => x.worktree === root)) return
+          if (server.projects.list().find((x) => pathKey(x.worktree) === pathKey(root))) return
           void serverSync().project.loadSessions(root)
           server.projects.open(root)
         },

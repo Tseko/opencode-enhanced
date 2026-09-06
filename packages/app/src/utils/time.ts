@@ -6,8 +6,8 @@ type TimeKey =
 
 type Translate = (key: TimeKey, params?: Record<string, string | number>) => string
 
-export function getRelativeTime(dateString: string, t: Translate): string {
-  const date = new Date(dateString)
+export function getRelativeTime(value: string | number, t: Translate): string {
+  const date = new Date(value)
   const now = new Date()
   const diffMs = now.getTime() - date.getTime()
   const diffSeconds = Math.floor(diffMs / 1000)

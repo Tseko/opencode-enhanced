@@ -4,6 +4,7 @@ import { ServerConnection, useServer } from "@/context/server"
 import { useServerSync } from "@/context/server-sync"
 import { useTabs } from "@/context/tabs"
 import { toggleHomeProjectSelection } from "@/pages/layout/helpers"
+import { pathKey } from "@/utils/path-key"
 import { createEffect, createMemo } from "solid-js"
 
 export function createHomeController() {
@@ -91,7 +92,7 @@ export function createHomeController() {
         if (!directory) return
         const ctx = global.ensureServerCtx(conn)
         directories.forEach((item) => {
-          if (ctx.projects.list().some((project) => project.worktree === item)) return
+          if (ctx.projects.list().some((project) => pathKey(project.worktree) === pathKey(item))) return
           const location = { directory: item }
           void ctx.sdk.api.file
             .list({ path: ".", location })

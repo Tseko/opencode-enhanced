@@ -261,6 +261,7 @@ export function createPromptSubmit(input: PromptSubmitInput) {
     if (!sessionID) return Promise.resolve()
 
     serverSync().session.set("todo", sessionID, [])
+    serverSync().session.set("session_status", sessionID, { type: "idle" })
 
     input.onAbort?.()
 

@@ -1,7 +1,7 @@
 import { getFilename } from "@opencode-ai/core/util/path"
 import { useDialog } from "@opencode-ai/ui/context/dialog"
 import { useMutation } from "@tanstack/solid-query"
-import { normalizeProjectInfo } from "@/context/global-sync/utils"
+import { matchProjectInfo, normalizeProjectInfo } from "@/context/global-sync/utils"
 import { createMemo } from "solid-js"
 import { createStore } from "solid-js/store"
 import { useGlobal } from "@/context/global"
@@ -69,38 +69,44 @@ export function createEditProjectModel(props: { project: LocalProject; server: S
     mutationFn: async () => {
       const name = store.name.trim() === folderName() ? "" : store.name.trim()
       const start = store.startup.trim()
+      const icon = { color: store.color || "", override: store.iconOverride || "" }
+      const commands = { start }
+      const sync = serverCtx().sync
+
+      // Persist locally first so the sidebar name updates even if the server call is skipped.
+      sync.project.meta(props.project.worktree, {
+        name,
+        icon: { color: store.color || undefined, override: store.iconOverride || undefined },
+        commands: { start: start || undefined },
+      })
+      sync.project.icon(props.project.worktree, store.iconOverride || undefined)
+      sync.set("project", (items) => {
+        const matched = matchProjectInfo(items, { id: props.project.id, worktree: props.project.worktree })
+        if (!matched) return items
+        return items.map((item) =>
+          item.id === matched.id
+            ? { ...item, name, icon: { ...item.icon, ...icon }, commands: { ...item.commands, ...commands } }
+            : item,
+        )
+      })
 
       if (props.project.id && props.project.id !== "global") {
-        if ((await serverCtx().sdk.protocol) !== "v1") return
         const project = await serverCtx()
           .sdk.client.project.update({
             projectID: props.project.id,
             directory: props.project.worktree,
             name,
-            icon: { color: store.color || "", override: store.iconOverride || "" },
-            commands: { start },
+            icon,
+            commands,
           })
           .then((result) => result.data)
-        if (!project) return
-        // const project = await serverCtx().sdk.api.project.update({
-        //   projectID: props.project.id,
-        //   name,
-        //   icon: { color: store.color || "", override: store.iconOverride || "" },
-        //   commands: { start },
-        // })
-        serverCtx().sync.set("project", (items) =>
-          items.map((item) => (item.id === project.id ? normalizeProjectInfo(project) : item)),
-        )
-        serverCtx().sync.project.icon(props.project.worktree, store.iconOverride || undefined)
-        dialog.close()
-        return
+        if (project) {
+          sync.set("project", (items) =>
+            items.map((item) => (item.id === project.id ? normalizeProjectInfo(project) : item)),
+          )
+        }
       }
 
-      serverCtx().sync.project.meta(props.project.worktree, {
-        name,
-        icon: { color: store.color || undefined, override: store.iconOverride || undefined },
-        commands: { start: start || undefined },
-      })
       dialog.close()
     },
   }))

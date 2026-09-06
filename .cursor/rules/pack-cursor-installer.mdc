@@ -1,0 +1,18 @@
+---
+description: After any OpenCode Cursor desktop/app change, pack a new Windows test installer
+alwaysApply: true
+---
+
+# Pack Cursor installer after changes
+
+When you change code that ships in the OpenCode Cursor desktop app (app, desktop, sidecar, core session paths used by the GUI), always pack a new isolated Windows installer before finishing. Do not wait to be asked.
+
+From `packages/desktop`:
+
+```powershell
+$env:PATH = "$env:USERPROFILE\.bun\bin;C:\Program Files\Git\cmd;$env:PATH"
+$env:BUN_INSTALL_CACHE_DIR = "C:\Users\admin\source\repos\opencode-enhanced\.bun-cache"
+bun scripts/pack-test-installer.ts
+```
+
+Return the new `dist/opencode-desktop-win-x64-0.0.0-cursor-*.exe` path. Installs as OpenCode Cursor into `%LOCALAPPDATA%\Programs\opencode-cursor`. Do not overwrite production OpenCode.

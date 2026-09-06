@@ -1,6 +1,7 @@
 import { For, Show, createEffect, createMemo, startTransition } from "solid-js"
-import { createStore } from "solid-js/store"
+import { createStore, produce } from "solid-js/store"
 import { useParams } from "@solidjs/router"
+import { Binary } from "@opencode-ai/core/util/binary"
 import { Icon as IconV2 } from "@opencode-ai/ui/v2/icon"
 import { IconButtonV2 } from "@opencode-ai/ui/v2/icon-button-v2"
 import { ProjectAvatar } from "@opencode-ai/ui/v2/project-avatar-v2"
@@ -13,12 +14,15 @@ import { usePlatform } from "@/context/platform"
 import { ServerConnection } from "@/context/server"
 import { useTabs } from "@/context/tabs"
 import { useSettingsCommand } from "@/components/settings-dialog"
-import { displayName, getProjectAvatarSource, sortedRootSessions } from "@/pages/layout/helpers"
+import { displayName, errorMessage, getProjectAvatarSource, sortedRootSessions } from "@/pages/layout/helpers"
 import { createHomeController, type HomeController } from "@/pages/home/home-controller"
 import { createHomeProjectsController, type HomeProjectsController } from "@/pages/home/home-projects-controller"
+import { archiveHomeSession } from "@/pages/home-session-archive"
 import { Persist, persisted } from "@/utils/persist"
 import { pathKey } from "@/utils/path-key"
 import { sessionTitle } from "@/utils/session-title"
+import { getRelativeTime } from "@/utils/time"
+import { showToast } from "@/utils/toast"
 import type { Session } from "@opencode-ai/sdk/v2/client"
 
 export function NewLayoutSidebarCommands() {
@@ -84,6 +88,38 @@ export function NewLayoutSidebar() {
     const conn = server()
     if (!conn) return
     projects.project.choose(conn)
+  }
+
+  const archiveSession = async (session: Session) => {
+    const conn = server()
+    const ctx = home.server.focusedContext()
+    if (!conn || !ctx) return
+    const [, setStore] = ctx.sync.child(session.directory)
+    if ((await ctx.sdk.protocol) !== "v1") return
+    await archiveHomeSession({
+      server: ServerConnection.key(conn),
+      session,
+      archive: (sessionID) =>
+        ctx.sdk.client.session.update({
+          sessionID,
+          directory: session.directory,
+          time: { archived: Date.now() },
+        }),
+      remove: () => {
+        setStore(
+          produce((draft) => {
+            const match = Binary.search(draft.session, session.id, (item) => item.id)
+            if (match.found) draft.session.splice(match.index, 1)
+          }),
+        )
+        sync().homeSessions.remove(session.id)
+      },
+      onError: (cause) =>
+        showToast({
+          title: language.t("common.requestFailed"),
+          description: errorMessage(cause, language.t("common.requestFailed")),
+        }),
+    })
   }
 
   return (
@@ -158,6 +194,7 @@ export function NewLayoutSidebar() {
                   projects.project.select(conn, project.worktree)
                 }}
                 onOpenSession={openSession}
+                onArchiveSession={archiveSession}
                 language={language}
               />
             )}
@@ -179,6 +216,7 @@ function SidebarProject(props: {
   onToggle: () => void
   onSelect: () => void
   onOpenSession: (session: Session) => void
+  onArchiveSession: (session: Session) => Promise<void>
   language: ReturnType<typeof useLanguage>
 }) {
   const sessions = createMemo(() => {
@@ -253,20 +291,57 @@ function SidebarProject(props: {
         <div class="flex flex-col py-0.5 pl-6">
           <For each={sessions()}>
             {(session) => (
-              <button
-                type="button"
-                class="flex h-7 min-w-0 w-full items-center rounded-[6px] px-1.5 text-left text-v2-text-text-muted hover:bg-v2-background-bg-layer-01 hover:text-v2-text-text-base"
-                classList={{
-                  "bg-v2-background-bg-layer-03 text-v2-text-text-base": props.activeSessionID === session.id,
-                }}
-                onClick={() => props.onOpenSession(session)}
-              >
-                <span class="min-w-0 truncate text-[13px] [font-weight:440]">{sessionTitle(session.title)}</span>
-              </button>
+              <SidebarSessionRow
+                session={session}
+                selected={props.activeSessionID === session.id}
+                language={props.language}
+                onOpen={() => props.onOpenSession(session)}
+                onArchive={() => void props.onArchiveSession(session)}
+              />
             )}
           </For>
         </div>
       </Show>
+    </div>
+  )
+}
+
+function SidebarSessionRow(props: {
+  session: Session
+  selected: boolean
+  language: ReturnType<typeof useLanguage>
+  onOpen: () => void
+  onArchive: () => void
+}) {
+  return (
+    <div
+      data-session-id={props.session.id}
+      class="group/session relative flex h-7 min-w-0 w-full items-center gap-1 rounded-[6px] px-1.5 text-v2-text-text-muted hover:bg-v2-background-bg-layer-01 hover:text-v2-text-text-base"
+      classList={{
+        "bg-v2-background-bg-layer-03 text-v2-text-text-base": props.selected,
+      }}
+    >
+      <button type="button" class="flex h-7 min-w-0 flex-1 items-center text-left" onClick={props.onOpen}>
+        <span class="min-w-0 truncate text-[13px] [font-weight:440]">{sessionTitle(props.session.title)}</span>
+      </button>
+      <TooltipV2 placement="top" value={props.language.t("common.archive")}>
+        <IconButtonV2
+          data-action="sidebar-session-archive"
+          variant="ghost-muted"
+          size="small"
+          icon={<IconV2 name="archive" />}
+          aria-label={props.language.t("common.archive")}
+          class="hover-reveal shrink-0 group-hover/session:opacity-100 focus-within:opacity-100"
+          onClick={(event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            props.onArchive()
+          }}
+        />
+      </TooltipV2>
+      <span class="shrink-0 text-[11px] tabular-nums text-v2-text-text-muted">
+        {getRelativeTime(props.session.time.updated ?? props.session.time.created, props.language.t)}
+      </span>
     </div>
   )
 }

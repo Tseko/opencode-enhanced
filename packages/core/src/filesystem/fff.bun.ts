@@ -109,6 +109,7 @@ export interface Picker {
   ): Result<Grep>
   trackQuery(query: string, file: string): Result<boolean>
   getHistoricalQuery(offset: number): Result<string | null>
+  indexPath(file: string, event: "add" | "change" | "unlink"): Result<boolean>
 }
 
 export function available() {
@@ -133,8 +134,19 @@ export function create(opts: Init): Result<Picker> {
       grep: (query, next) => pick.grep(query, next),
       trackQuery: (query, file) => pick.trackQuery(query, file),
       getHistoricalQuery: (offset) => pick.getHistoricalQuery(offset),
+      indexPath: (file, event) => {
+        const notify = pick as FileFinderNotify
+        if (typeof notify.notifyFsEvent === "function") return notify.notifyFsEvent(file, event)
+        if (typeof notify.refreshPath === "function") return notify.refreshPath(file)
+        return { ok: true, value: true }
+      },
     },
   }
+}
+
+type FileFinderNotify = {
+  notifyFsEvent?: (file: string, event: "add" | "change" | "unlink") => Result<boolean>
+  refreshPath?: (file: string) => Result<boolean>
 }
 
 export * as Fff from "./fff.bun"

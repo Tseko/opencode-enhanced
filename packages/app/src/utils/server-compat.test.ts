@@ -37,6 +37,12 @@ function setup(
       }
       if (request.method === "GET" && new URL(request.url).pathname === "/vcs")
         return Response.json(responses?.vcs ?? {})
+      if (request.method === "GET" && new URL(request.url).pathname === "/api/command") {
+        return Response.json({
+          location: { directory: "/repo", project: { id: "project", directory: "/repo" } },
+          data: [{ name: "review", template: "Review $ARGUMENTS" }],
+        })
+      }
       if (request.method === "GET") return Response.json([])
       return new Response(undefined, { status: 204 })
     },
@@ -46,6 +52,7 @@ function setup(
   const api = createCompatibleApi({
     protocol: typeof protocol === "string" ? Promise.resolve(protocol) : protocol,
     current: createApiForServer({ server, fetch: fetcher }),
+    next: createSdkForServer({ server, fetch: fetcher, directory: "/repo", throwOnError: true }),
     legacy: (directory) => createSdkForServer({ server, fetch: fetcher, directory, throwOnError: true }),
     directory: "/repo",
   })
@@ -66,7 +73,7 @@ describe("createCompatibleApi", () => {
   })
   */
 
-  test("converts current prompts to the V1 prompt contract", async () => {
+  test("routes V1-protocol prompts through the V2 session prompt endpoint", async () => {
     const { api, requests } = setup("v1")
     await api.session.prompt({
       sessionID: "ses_1",
@@ -80,38 +87,33 @@ describe("createCompatibleApi", () => {
       ],
     })
 
-    expect(new URL(requests[0]!.url).pathname).toBe("/session/ses_1/prompt_async")
-    const body = await requests[0]!.json()
-    expect(body).toMatchObject({
-      messageID: "msg_1",
-      agent: "build",
-      model: { providerID: "provider", modelID: "model" },
-      parts: [
-        { type: "text", text: "hello @src/index.ts" },
-        {
-          type: "file",
-          mime: "text/plain",
-          url: "file:///repo/src/index.ts",
-          filename: "index.ts",
-          source: {
-            type: "file",
-            text: { value: "@src/index.ts", start: 6, end: 19 },
-            path: "file:///repo/src/index.ts",
-          },
-        },
-        {
-          type: "file",
-          mime: "text/plain",
-          url: "data:text/plain;base64,aGVsbG8=",
-          filename: "notes.txt",
-        },
-      ],
+    const prompt = requests.find((request) => new URL(request.url).pathname.endsWith("/prompt"))
+    expect(prompt).toBeDefined()
+    expect(requests.some((request) => new URL(request.url).pathname.endsWith("/prompt_async"))).toBe(false)
+    expect(await prompt!.json()).toMatchObject({
+      id: "msg_1",
+      prompt: {
+        text: "hello @src/index.ts",
+        files: [
+          { uri: "file:///repo/src/index.ts", name: "index.ts", source: { start: 6, end: 19, text: "@src/index.ts" } },
+          { uri: "data:text/plain;base64,aGVsbG8=", name: "notes.txt" },
+        ],
+      },
     })
-    expect(body.parts[2]).not.toHaveProperty("source")
   })
 
-  test("preserves original parts for V1 optimistic reconciliation", async () => {
+  test("routes V1 interrupt through abort and the V2 interrupt endpoint", async () => {
     const { api, requests } = setup("v1")
+    await api.session.interrupt({ sessionID: "ses_1" })
+
+    expect(requests.map((request) => new URL(request.url).pathname).sort()).toEqual([
+      "/api/session/ses_1/interrupt",
+      "/session/ses_1/abort",
+    ])
+  })
+
+  test("maps original parts into the V2 prompt payload", async () => {
+    const { api, requests } = setup("v2")
     await api.session.prompt({
       sessionID: "ses_1",
       id: "msg_1",
@@ -123,10 +125,15 @@ describe("createCompatibleApi", () => {
       ],
     })
 
-    expect((await requests[0]!.json()).parts).toEqual([
-      { id: "prt_text", type: "text", text: "look" },
-      { id: "prt_image", type: "file", mime: "image/png", url: "data:image/png;base64,AAAA", filename: "image.png" },
-    ])
+    const prompt = requests.find((request) => new URL(request.url).pathname.endsWith("/prompt"))
+    expect(prompt).toBeDefined()
+    expect(await prompt!.json()).toMatchObject({
+      id: "msg_1",
+      prompt: {
+        text: "look",
+        files: [{ uri: "data:image/png;base64,AAAA", name: "image.png" }],
+      },
+    })
   })
 
   test("resolves protocol detection once across implementation methods", async () => {
@@ -184,17 +191,78 @@ describe("createCompatibleApi", () => {
     expect(url.searchParams.get("limit")).toBe("20")
   })
 
-  test("routes V1 permission replies through the requested directory", async () => {
+  test("routes V1-protocol permission replies through the V2 session permission endpoint", async () => {
     const { api, requests } = setup("v1")
     await api.permission.reply({
       sessionID: "ses_1",
-      requestID: "permission_1",
-      reply: "once",
+      requestID: "per_1",
+      reply: "always",
       location: { directory: "/other" },
     })
 
-    expect(new URL(requests[0]!.url).pathname).toBe("/session/ses_1/permissions/permission_1")
-    expect(new URL(requests[0]!.url).searchParams.get("directory")).toBe("/other")
+    expect(new URL(requests[0]!.url).pathname).toBe("/api/session/ses_1/permission/per_1/reply")
+    expect(await requests[0]!.json()).toEqual({ reply: "always" })
+  })
+
+  test("routes V2 permission replies through the current session permission endpoint", async () => {
+    const { api, requests } = setup("v2")
+    await api.permission.reply({
+      sessionID: "ses_1",
+      requestID: "per_1",
+      reply: "once",
+    })
+
+    expect(new URL(requests[0]!.url).pathname).toBe("/api/session/ses_1/permission/per_1/reply")
+    expect(await requests[0]!.json()).toEqual({ reply: "once" })
+  })
+
+  test("routes V1-protocol compact, revert, and active through V2 session endpoints", async () => {
+    const { api, requests } = setup("v1")
+    await api.session.compact({ sessionID: "ses_1" })
+    await api.session.revert.stage({ sessionID: "ses_1", messageID: "msg_1" })
+    await api.session.revert.clear({ sessionID: "ses_1" })
+    await api.session.revert.commit({ sessionID: "ses_1" })
+    await api.session.active()
+
+    expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
+      "/api/session/ses_1/compact",
+      "/api/session/ses_1/revert/stage",
+      "/api/session/ses_1/revert/clear",
+      "/api/session/ses_1/revert/commit",
+      "/api/session/active",
+    ])
+    expect(requests.some((request) => new URL(request.url).pathname.includes("/summarize"))).toBe(false)
+    expect(requests.some((request) => new URL(request.url).pathname.includes("/unrevert"))).toBe(false)
+  })
+
+  test("routes V1-protocol question replies through V2 session question endpoints", async () => {
+    const { api, requests } = setup("v1")
+    await api.question.reply({ sessionID: "ses_1", requestID: "q_1", answers: [] })
+    await api.question.reject({ sessionID: "ses_1", requestID: "q_1" })
+
+    expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
+      "/api/session/ses_1/question/q_1/reply",
+      "/api/session/ses_1/question/q_1/reject",
+    ])
+  })
+
+  test("routes V1-protocol slash commands through the V2 session prompt endpoint", async () => {
+    const { api, requests } = setup("v1")
+    await api.session.command({ sessionID: "ses_1", command: "review", arguments: "src" })
+
+    expect(requests.some((request) => new URL(request.url).pathname === "/session/ses_1/command")).toBe(false)
+    const prompt = requests.find((request) => new URL(request.url).pathname.endsWith("/prompt"))
+    expect(prompt).toBeDefined()
+    expect(await prompt!.json()).toMatchObject({
+      prompt: { text: "Review src" },
+    })
+  })
+
+  test("keeps V1-protocol shell on the legacy session endpoint", async () => {
+    const { api, requests } = setup("v1")
+    await api.session.shell({ sessionID: "ses_1", command: "ls" })
+
+    expect(requests.map((request) => new URL(request.url).pathname)).toEqual(["/session/ses_1/shell"])
   })
 
   test("disposes the V1 instance after connecting a provider", async () => {

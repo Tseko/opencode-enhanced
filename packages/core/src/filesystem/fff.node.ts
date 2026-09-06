@@ -125,6 +125,7 @@ export interface Picker {
   ): Result<Grep>
   trackQuery(query: string, file: string): Result<boolean>
   getHistoricalQuery(offset: number): Result<string | null>
+  indexPath(file: string, event: "add" | "change" | "unlink"): Result<boolean>
 }
 
 export function available() {

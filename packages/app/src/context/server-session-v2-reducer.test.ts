@@ -153,4 +153,122 @@ describe("v2 session reducer", () => {
 
     expect(result).toMatchObject({ sessionID: "ses_1", missing: "msg_user", touched: [] })
   })
+
+  test("projects native session.next events into the same timeline", () => {
+    const reducer = createV2SessionReducer()
+    let messages: SessionMessageInfo[] = []
+    const apply = (input: object) => {
+      const result = reducer.reduce(messages, event(input))
+      if (result) messages = result.messages
+      return result
+    }
+
+    apply({
+      ...base,
+      id: "evt_admitted",
+      type: "session.next.prompt.admitted",
+      data: {
+        sessionID: "ses_1",
+        messageID: "msg_user",
+        timestamp: 1,
+        delivery: "steer",
+        prompt: { text: "hello" },
+      },
+    })
+    apply({
+      ...base,
+      id: "evt_promoted",
+      type: "session.next.prompted",
+      data: {
+        sessionID: "ses_1",
+        messageID: "msg_user",
+        timestamp: 1,
+        delivery: "steer",
+        prompt: { text: "hello" },
+      },
+    })
+    apply({
+      ...base,
+      id: "evt_step",
+      type: "session.next.step.started",
+      data: {
+        sessionID: "ses_1",
+        assistantMessageID: "msg_assistant",
+        agent: "build",
+        model: { id: "model", providerID: "provider" },
+      },
+    })
+    apply({
+      ...base,
+      id: "evt_text_start",
+      type: "session.next.text.started",
+      data: { sessionID: "ses_1", assistantMessageID: "msg_assistant", textID: "txt_1" },
+    })
+    apply({
+      ...base,
+      id: "evt_text_delta",
+      type: "session.next.text.delta",
+      data: { sessionID: "ses_1", assistantMessageID: "msg_assistant", textID: "txt_1", delta: "hel" },
+    })
+    apply({
+      ...base,
+      id: "evt_text_end",
+      type: "session.next.text.ended",
+      data: { sessionID: "ses_1", assistantMessageID: "msg_assistant", textID: "txt_1", text: "hello" },
+    })
+
+    expect(messages[0]).toMatchObject({ id: "msg_user", type: "user", text: "hello" })
+    expect(messages[1]).toMatchObject({
+      id: "msg_assistant",
+      type: "assistant",
+      content: [{ type: "text", text: "hello" }],
+    })
+  })
+
+  test("maps versioned session.next event types", () => {
+    const reducer = createV2SessionReducer()
+    let messages: SessionMessageInfo[] = []
+    const apply = (input: object) => {
+      const result = reducer.reduce(messages, event(input))
+      if (result) messages = result.messages
+    }
+
+    apply({
+      ...base,
+      id: "evt_admitted",
+      type: "session.next.prompt.admitted.1",
+      data: {
+        sessionID: "ses_1",
+        messageID: "msg_user",
+        timestamp: 1,
+        delivery: "steer",
+        prompt: { text: "hello" },
+      },
+    })
+    apply({
+      ...base,
+      id: "evt_promoted",
+      type: "session.next.prompted.1",
+      data: {
+        sessionID: "ses_1",
+        messageID: "msg_user",
+        timestamp: 1,
+        delivery: "steer",
+        prompt: { text: "hello" },
+      },
+    })
+    apply({
+      ...base,
+      id: "evt_step",
+      type: "session.next.step.started.2",
+      data: {
+        sessionID: "ses_1",
+        assistantMessageID: "msg_assistant",
+        agent: "build",
+        model: { id: "model", providerID: "provider" },
+      },
+    })
+
+    expect(messages.map((message) => message.id)).toEqual(["msg_user", "msg_assistant"])
+  })
 })

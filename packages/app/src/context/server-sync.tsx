@@ -42,6 +42,7 @@ import { createSimpleContext } from "@opencode-ai/ui/context"
 import { NormalizedProviderListResponse } from "@opencode-ai/session-ui/context"
 import { createRefCountMap } from "@/utils/refcount"
 import { useGlobal } from "./global"
+import { usePlatform } from "./platform"
 import { ServerConnection, useServer } from "./server"
 import { retry } from "@opencode-ai/core/util/retry"
 import type { ServerScope } from "@/utils/server-scope"
@@ -90,6 +91,10 @@ type SessionActiveApi = {
   readonly active: () => Promise<SessionActiveOutput>
 }
 
+function missingJsonApi(error: unknown) {
+  return error instanceof Error && error.name === "ClientError" && error.message === "UnsupportedContentType"
+}
+
 export const loadMcpQuery = (
   scope: ServerScope,
   directory: string,
@@ -106,9 +111,14 @@ export const loadMcpQuery = (
     queryKey: [scope, directory, "mcp"] as const,
     queryFn: async () => {
       if ((await protocol) === "v1" && legacy) return (await legacy.mcp.status()).data ?? {}
-      return api
-        .list({ location: { directory } })
-        .then((result) => Object.fromEntries(result.data.map((server) => [server.name, server.status])))
+      try {
+        const result = await api.list({ location: { directory } })
+        return Object.fromEntries(result.data.map((server) => [server.name, server.status]))
+      } catch (error) {
+        // Current V2 HttpApi has no /api/mcp; unmatched paths fall through to HTML.
+        if (missingJsonApi(error)) return {}
+        throw error
+      }
     },
   })
 
@@ -135,11 +145,15 @@ export const loadMcpResourcesQuery = (
           ]),
         )
       }
-      return api.resource
-        .catalog({ location: { directory } })
-        .then((result) =>
-          Object.fromEntries(result.data.resources.map((resource) => [`${resource.server}:${resource.uri}`, resource])),
+      try {
+        const result = await api.resource.catalog({ location: { directory } })
+        return Object.fromEntries(
+          result.data.resources.map((resource) => [`${resource.server}:${resource.uri}`, resource]),
         )
+      } catch (error) {
+        if (missingJsonApi(error)) return {}
+        throw error
+      }
     },
     placeholderData: {},
   })
@@ -224,8 +238,10 @@ export function createServerSyncContextInner(serverSDK: ServerSDK) {
     return sdk
   }
 
+  const platform = usePlatform()
   const session = createServerSession(serverSDK.client, serverSDK.api.session, serverSDK.api.message, {
     protocol: serverSDK.protocol,
+    currentHistory: platform.platform === "desktop",
   })
   const queryOptionsApi = makeQueryOptionsApi(
     serverSDK.scope,
@@ -241,18 +257,6 @@ export function createServerSyncContextInner(serverSDK: ServerSDK) {
   const activeSessionsQuery = useQuery(() =>
     loadActiveSessionsQuery(serverSDK.scope, {
       active: async () => {
-        if ((await serverSDK.protocol) === "v1") {
-          const statuses = (await serverSDK.client.session.status()).data ?? {}
-          seedActiveSessionStatuses(session, statuses)
-          for (const sessionID of Object.keys(statuses)) {
-            void session.resolve(sessionID).catch(() => undefined)
-          }
-          return Object.fromEntries(
-            Object.entries(statuses).flatMap(([sessionID, status]) =>
-              status.type === "idle" ? [] : [[sessionID, { type: "running" as const }]],
-            ),
-          )
-        }
         const active = await serverSDK.api.session.active()
         seedActiveSessionStatuses(session, active)
         for (const sessionID of Object.keys(active)) {

@@ -14,6 +14,7 @@ import { FSUtil } from "../fs-util"
 import { Git } from "../git"
 import { Location } from "../location"
 import { lazy } from "../util/lazy"
+import { FileSystemSearch } from "./search"
 import { Ignore } from "./ignore"
 import { Protected } from "./protected"
 
@@ -74,6 +75,7 @@ const layer = Layer.effect(
 
     yield* Effect.logInfo("watcher backend", { directory: location.directory, platform: process.platform, backend })
     const events = yield* EventV2.Service
+    const search = yield* FileSystemSearch.Service
     const fs = yield* FSUtil.Service
     const git = yield* Git.Service
     const context = yield* Effect.context()
@@ -83,11 +85,45 @@ const layer = Layer.effect(
       Effect.promise(() => Promise.allSettled(subscriptions.map((subscription) => subscription.unsubscribe()))),
     )
 
+    const queued = new Map<string, "add" | "change" | "unlink">()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const flush = () => {
+      timer = undefined
+      const batch = [...queued]
+      queued.clear()
+      for (const [file, event] of batch) {
+        const normalized = file.replaceAll("\\", "/")
+        if (normalized.includes("/.git/") || normalized.endsWith("/.git")) continue
+        runFork(
+          search.reindex({ file, event }).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("failed to reindex watched file", { file, event, cause: Cause.pretty(cause) }),
+            ),
+          ),
+        )
+      }
+    }
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => {
+        if (timer) clearTimeout(timer)
+        if (queued.size > 0) flush()
+      }),
+    )
+
+    const publish = (file: string, event: "add" | "change" | "unlink") => {
+      runFork(events.publish(Event.Updated, { file, event }))
+      const previous = queued.get(file)
+      if (event === "unlink" || !previous) queued.set(file, event)
+      else if (previous === "unlink") queued.set(file, event)
+      if (timer) return
+      timer = setTimeout(flush, 50)
+    }
+
     const callback: ParcelWatcher.SubscribeCallback = (_error, updates) => {
       for (const update of updates) {
-        if (update.type === "create") runFork(events.publish(Event.Updated, { file: update.path, event: "add" }))
-        if (update.type === "update") runFork(events.publish(Event.Updated, { file: update.path, event: "change" }))
-        if (update.type === "delete") runFork(events.publish(Event.Updated, { file: update.path, event: "unlink" }))
+        if (update.type === "create") publish(update.path, "add")
+        if (update.type === "update") publish(update.path, "change")
+        if (update.type === "delete") publish(update.path, "unlink")
       }
     }
 
@@ -106,9 +142,20 @@ const layer = Layer.effect(
     const config = (yield* (yield* Config.Service).entries())
       .filter((entry): entry is Config.Document => entry.type === "document")
       .flatMap((item) => item.info.watcher?.ignore ?? [])
+    const nested = Ignore.PATTERNS.flatMap((pattern) => {
+      if (pattern.includes("*") || pattern.includes("/")) return []
+      return [`**/${pattern}/**`, `**/${pattern}`]
+    })
     if (location.vcs && (yield* Flag.OPENCODE_EXPERIMENTAL_FILEWATCHER)) {
       yield* Effect.forkScoped(
-        subscribe(location.directory, [...Ignore.PATTERNS, ...config, ...protecteds(location.directory)]),
+        subscribe(location.directory, [
+          ...Ignore.PATTERNS,
+          ...nested,
+          ".bun-cache",
+          "**/.bun-cache/**",
+          ...config,
+          ...protecteds(location.directory),
+        ]),
       )
     }
 
@@ -136,5 +183,5 @@ const layer = Layer.effect(
 export const node = makeLocationNode({
   service: Service,
   layer,
-  deps: [FSUtil.node, Location.node, Config.node, Git.node, EventV2.node],
+  deps: [FSUtil.node, Location.node, Config.node, Git.node, EventV2.node, FileSystemSearch.node],
 })

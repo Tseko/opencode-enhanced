@@ -14,7 +14,7 @@ import { PromptInput } from "@opencode-ai/schema/prompt-input"
 import { EventV2 } from "./event"
 import { Database } from "./database/database"
 import { SessionProjector } from "./session/projector"
-import { SessionMessageTable, SessionTable } from "./session/sql"
+import { SessionMessageTable, SessionInputTable, SessionTable } from "./session/sql"
 import { SessionSchema } from "./session/schema"
 import { AbsolutePath, PositiveInt, RelativePath } from "./schema"
 import { AgentV2 } from "./agent"
@@ -23,7 +23,8 @@ import { InstallationVersion } from "./installation/version"
 import { Slug } from "./util/slug"
 import { ProjectTable } from "./project/sql"
 import path from "path"
-import { fromRow } from "./session/info"
+import { fromRow, toV1 } from "./session/info"
+import { SessionTitle } from "./session/title"
 import { SessionRunner } from "./session/runner/index"
 import { SessionStore } from "./session/store"
 import { SessionExecution } from "./session/execution"
@@ -193,6 +194,35 @@ const layer = Layer.effect(
     const locations = yield* LocationServiceMap.Service
     const decodeMessage = Schema.decodeUnknownEffect(SessionMessage.Message)
     const isDurableSessionEvent = Schema.is(SessionEvent.Durable)
+    const applyInitialTitle = Effect.fnUntraced(function* (sessionID: SessionSchema.ID) {
+      const row = yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)
+      if (!row || row.parent_id || !SessionTitle.isDefault(row.title)) return
+      const inputs = yield* db
+        .select()
+        .from(SessionInputTable)
+        .where(eq(SessionInputTable.session_id, sessionID))
+        .orderBy(asc(SessionInputTable.admitted_seq))
+        .all()
+        .pipe(Effect.orDie)
+      const first = inputs[0]
+      if (!first) return
+      const title = SessionTitle.fromPrompt(first.prompt.text)
+      if (!title) return
+      const now = yield* DateTime.now
+      yield* events.publish(
+        SessionV1.Event.Updated,
+        {
+          sessionID,
+          info: toV1({ ...row, title, time_updated: DateTime.toEpochMillis(now) }),
+        },
+        {
+          location: Location.Ref.make({
+            directory: AbsolutePath.make(row.directory),
+            workspaceID: row.workspace_id ? WorkspaceV2.ID.make(row.workspace_id) : undefined,
+          }),
+        },
+      )
+    })
     const decode = (row: typeof SessionMessageTable.$inferSelect) =>
       decodeMessage({ ...row.data, id: row.id, type: row.type }).pipe(
         Effect.mapError(
@@ -379,6 +409,7 @@ const layer = Layer.effect(
             )
             if (!SessionInput.equivalent(admitted, expected))
               return yield* new PromptConflictError({ sessionID: input.sessionID, messageID })
+            yield* applyInitialTitle(admitted.sessionID)
             if (input.resume !== false) yield* execution.wake(admitted.sessionID)
             return admitted
           }),

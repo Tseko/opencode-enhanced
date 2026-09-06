@@ -20,7 +20,7 @@ import { rootSession } from "@/utils/session-route"
 import { normalizeSessionInfo } from "@/utils/session"
 import { compareMessages, messageKey, normalizeSessionMessages } from "@/utils/session-message"
 import { dropSessionCaches, pickSessionCacheEvictions, SESSION_CACHE_LIMIT } from "./global-sync/session-cache"
-import { createV2SessionReducer, type V2SessionReduction } from "./server-session-v2-reducer"
+import { createV2SessionReducer, currentV2Event, type V2SessionReduction } from "./server-session-v2-reducer"
 import type { ServerApi } from "@/utils/server"
 
 type MessageApi = ServerApi["message"]
@@ -183,7 +183,11 @@ function reconcileFetched<T extends { id: string }>(
   return options.compare ? items.sort(options.compare) : items
 }
 
-type ServerSessionOptions = { retry?: typeof retry; protocol?: Promise<"v1" | "v2"> }
+type ServerSessionOptions = {
+  retry?: typeof retry
+  protocol?: Promise<"v1" | "v2">
+  currentHistory?: boolean
+}
 
 export function createServerSession(
   client: OpencodeClient,
@@ -534,8 +538,10 @@ export function createServerSession(
       pickSessionCacheEvictions({ seen, keep: sessionID, limit: SESSION_CACHE_LIMIT, preserve: protectedSessions() }),
     )
 
+  const currentMessages = async () => options?.currentHistory === true || (await options?.protocol) !== "v1"
+
   const fetchMessages = async (sessionID: string, limit: number, before?: string, onAttempt?: () => void) => {
-    if (messageApi && (await options?.protocol) !== "v1") {
+    if (messageApi && (await currentMessages())) {
       const request = (cursor?: string) =>
         (options?.retry ?? retry)(() => {
           onAttempt?.()
@@ -582,7 +588,7 @@ export function createServerSession(
   }
 
   const fetchMessage = async (sessionID: string, messageID: string, onAttempt?: () => void) => {
-    if (sessionApi && (await options?.protocol) !== "v1") {
+    if (sessionApi && (await currentMessages())) {
       const response = await (options?.retry ?? retry)(() => {
         onAttempt?.()
         return sessionApi.message({ sessionID, messageID })
@@ -808,8 +814,12 @@ export function createServerSession(
                 parents.map((parent) => ({ id: parent.message.id, part: parent.parts })),
               ),
             }
+      const preserveLive =
+        result.session.length === 0 &&
+        ((data.message[sessionID]?.length ?? 0) > 0 || (data.session_message[sessionID]?.length ?? 0) > 0)
       const preserveUnfetched =
         mode === "prepend" ||
+        preserveLive ||
         (!result.complete && (!first || ((message: Message) => compareMessages(message, first) < 0)))
       applyMessagePage(
         sessionID,
@@ -934,53 +944,63 @@ export function createServerSession(
   }
 
   const applyV2 = (event: OpenCodeEvent) => {
-    if (!("data" in event) || !("sessionID" in event.data) || typeof event.data.sessionID !== "string") return
-    const sessionID = event.data.sessionID
-    const reduction = v2.reduce(data.session_message[sessionID] ?? [], event)
+    const current = currentV2Event(event)
+    if (!("data" in current) || !("sessionID" in current.data) || typeof current.data.sessionID !== "string") return
+    const sessionID = current.data.sessionID
+    const reduction = v2.reduce(data.session_message[sessionID] ?? [], current)
     if (reduction) {
       projectV2(reduction)
       if (reduction.missing) hydrateV2Message(sessionID, reduction.missing)
     }
 
     const info = data.info[sessionID]
-    if (event.type === "session.renamed" && info)
-      remember({ ...info, title: event.data.title, time: { ...info.time, updated: event.created } })
-    if (event.type === "session.moved" && info)
+    if (current.type === "session.renamed" && info)
+      remember({ ...info, title: current.data.title, time: { ...info.time, updated: current.created } })
+    if (current.type === "session.moved" && info)
       remember({
         ...info,
-        projectID: event.data.projectID ?? info.projectID,
-        workspaceID: event.data.location.workspaceID,
-        directory: event.data.location.directory,
-        path: event.data.subpath,
-        time: { ...info.time, updated: event.created },
+        projectID: current.data.projectID ?? info.projectID,
+        workspaceID: current.data.location.workspaceID,
+        directory: current.data.location.directory,
+        path: current.data.subpath,
+        time: { ...info.time, updated: current.created },
       })
-    if (event.type === "session.usage.updated" && info)
-      remember({ ...info, cost: event.data.cost, tokens: event.data.tokens })
-    // if (event.type === "session.archived") {
-    //   if (info) remember({ ...info, time: { ...info.time, archived: event.created, updated: event.created } })
-    //   evict([sessionID])
-    // }
-    if (event.type === "session.execution.started") setData("session_status", sessionID, { type: "busy" })
+    if (current.type === "session.usage.updated" && info)
+      remember({ ...info, cost: current.data.cost, tokens: current.data.tokens })
+    if (current.type === "session.status" && "status" in current.data)
+      setData("session_status", sessionID, reconcile(current.data.status as SessionStatus))
+    if (current.type === "session.execution.started") setData("session_status", sessionID, { type: "busy" })
     if (
-      event.type === "session.execution.succeeded" ||
-      event.type === "session.execution.failed" ||
-      event.type === "session.execution.interrupted"
+      current.type === "session.execution.succeeded" ||
+      current.type === "session.execution.failed" ||
+      current.type === "session.execution.interrupted"
     )
       setData("session_status", sessionID, { type: "idle" })
-    if (event.type === "session.retry.scheduled")
+    if (current.type === "session.retry.scheduled")
       setData("session_status", sessionID, {
         type: "retry",
-        attempt: event.data.attempt,
-        message: event.data.error.message,
-        next: event.data.at,
+        attempt: current.data.attempt,
+        message: current.data.error.message,
+        next: current.data.at,
       })
-    if (event.type === "session.forked") void resolve(sessionID, { force: true }).catch(() => {})
+    if (current.type === "session.forked") void resolve(sessionID, { force: true }).catch(() => {})
     if (
-      event.type === "session.revert.staged" ||
-      event.type === "session.revert.cleared" ||
-      event.type === "session.revert.committed"
+      current.type === "session.revert.staged" ||
+      current.type === "session.revert.cleared" ||
+      current.type === "session.revert.committed"
     )
       void resolve(sessionID, { force: true }).catch(() => {})
+    const idle =
+      current.type === "session.execution.succeeded" ||
+      current.type === "session.execution.failed" ||
+      current.type === "session.execution.interrupted" ||
+      (current.type === "session.status" &&
+        "status" in current.data &&
+        !!current.data.status &&
+        typeof current.data.status === "object" &&
+        "type" in current.data.status &&
+        current.data.status.type === "idle")
+    if (options?.currentHistory && idle) void sync(sessionID, { force: true }).catch(() => {})
   }
 
   const apply = (event: { type: string; properties?: unknown }) => {
@@ -1380,7 +1400,7 @@ export function createServerSession(
     async todo(sessionID: string, request?: { force?: boolean }) {
       touch(sessionID)
       if (data.todo[sessionID] !== undefined && !request?.force) return
-      if ((await options?.protocol) === "v2") {
+      if ((await options?.protocol) === "v2" || options?.currentHistory === true) {
         setData("todo", sessionID, [])
         return
       }

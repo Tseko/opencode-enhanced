@@ -101,28 +101,42 @@ const withDefaults = (model: ModelV2.Info, route: AnyRoute) => {
   })
 }
 
+const REASONING_VARIANT_IDS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max"])
+
 const withVariant = (
   model: ModelV2.Info,
   variantID: ModelV2.VariantID | undefined,
 ): Effect.Effect<ModelV2.Info, VariantUnavailableError> => {
   const id = variantID === "default" || variantID === undefined ? model.request.variant : variantID
   const variant = model.variants.find((item) => item.id === id)
-  if (!variant && variantID !== undefined && variantID !== "default")
-    return Effect.fail(
-      new VariantUnavailableError({
-        providerID: model.providerID,
-        modelID: model.id,
-        variant: variantID,
+  if (variant)
+    return Effect.succeed(
+      produce(model, (draft) => {
+        Object.assign(draft.request.headers, variant.headers)
+        Object.assign(draft.request.body, variant.body)
       }),
     )
-  return Effect.succeed(
-    variant
-      ? produce(model, (draft) => {
-          Object.assign(draft.request.headers, variant.headers)
-          Object.assign(draft.request.body, variant.body)
-        })
-      : model,
+  if (id === undefined || id === "default") return Effect.succeed(model)
+  const body = reasoningVariantBody(model, id)
+  if (body)
+    return Effect.succeed(
+      produce(model, (draft) => {
+        Object.assign(draft.request.body, body)
+      }),
+    )
+  return Effect.fail(
+    new VariantUnavailableError({
+      providerID: model.providerID,
+      modelID: model.id,
+      variant: variantID ?? ModelV2.VariantID.make(id),
+    }),
   )
+}
+
+function reasoningVariantBody(model: ModelV2.Info, id: string) {
+  if (!REASONING_VARIANT_IDS.has(id) || model.api.type !== "aisdk") return
+  if (model.api.package === "@ai-sdk/openai") return { reasoning: { effort: id } }
+  if (model.api.package === "@ai-sdk/openai-compatible") return { reasoning_effort: id }
 }
 
 const apiName = (model: ModelV2.Info) =>
@@ -189,12 +203,10 @@ export const locationLayer = Layer.effect(
         // Location plugins populate and filter the catalog asynchronously during layer startup.
         const defaultModel = session.model ? undefined : yield* catalog.model.default()
         const selected = session.model
-          ? (yield* catalog.model.available()).find(
-              (model) => model.providerID === session.model?.providerID && model.id === session.model.id,
-            )
+          ? yield* catalog.model.get(session.model.providerID, session.model.id)
           : defaultModel && supported(defaultModel)
             ? defaultModel
-            : (yield* catalog.model.available()).find(supported)
+            : (yield* catalog.model.all()).find(supported)
         if (!selected && session.model)
           return yield* new ModelUnavailableError({
             providerID: session.model.providerID,

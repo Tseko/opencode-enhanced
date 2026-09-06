@@ -738,6 +738,8 @@ function ViewerShell(props: {
 
 function TextViewer<T>(props: TextFileProps<T>) {
   let instance: PierreFile<T> | VirtualizedFile<T> | undefined
+  let instanceVirtualizer: Virtualizer | undefined
+  let instanceWorkerPool: ReturnType<typeof getWorkerPool> | undefined
   let viewer!: Viewer
 
   const [local, others] = splitProps(props, textKeys)
@@ -908,17 +910,21 @@ function TextViewer<T>(props: TextFileProps<T>) {
     const opts = options()
     const workerPool = getWorkerPool("unified")
     const virtualizer = virtuals.get()
+    const reset =
+      instance !== undefined && (instanceVirtualizer !== virtualizer || instanceWorkerPool !== workerPool)
 
     renderViewer({
       viewer,
       current: instance,
-      reset: instance !== undefined,
+      reset,
       create: () =>
         virtualizer
           ? new VirtualizedFile<T>(opts, virtualizer, codeMetrics, workerPool)
           : new PierreFile<T>(opts, workerPool),
       assign: (value) => {
         instance = value
+        instanceVirtualizer = virtualizer
+        instanceWorkerPool = workerPool
       },
       draw: (value) => {
         const contents = text()

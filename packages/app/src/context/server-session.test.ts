@@ -344,6 +344,88 @@ describe("server session", () => {
     expect(store.data.session_message.root.map((message) => message.id)).toEqual([user.id, assistant.id])
   })
 
+  test("loads current history when currentHistory is set for a v1 protocol", async () => {
+    const requests: unknown[] = []
+    const user = { id: "msg_z_user", type: "user", text: "hello", time: { created: 1 } }
+    const assistant = {
+      id: "msg_a_assistant",
+      type: "assistant",
+      agent: "build",
+      model: { id: "model", providerID: "provider" },
+      content: [{ type: "text", text: "hi" }],
+      time: { created: 2, completed: 3 },
+    }
+    const client = {
+      session: {
+        messages: () => {
+          throw new Error("legacy message endpoint called")
+        },
+      },
+    } as unknown as OpencodeClient
+    const messageApi = {
+      list: async (input: unknown) => {
+        requests.push(input)
+        return { data: [assistant, user], cursor: { previous: null, next: null } }
+      },
+    } as unknown as MessageApi
+    const store = createServerSession(client, {} as SessionApi, messageApi, {
+      protocol: Promise.resolve("v1"),
+      currentHistory: true,
+    })
+    store.remember(session("root"))
+
+    await store.sync("root")
+
+    expect(requests).toEqual([{ sessionID: "root", limit: 20, order: "desc" }])
+    expect(store.data.session_message.root.map((message) => message.id)).toEqual([user.id, assistant.id])
+    expect(store.data.message.root.map((message) => message.id)).toEqual([user.id, assistant.id])
+  })
+
+  test("keeps live current messages when a V1 history page is empty", async () => {
+    const client = messageClient(response(), response())
+    const messageApi = {
+      list: () => {
+        throw new Error("current message endpoint called")
+      },
+    } as unknown as MessageApi
+    const store = createServerSession(client, {} as SessionApi, messageApi, {
+      protocol: Promise.resolve("v1"),
+    })
+    store.remember(session("root"))
+    await store.sync("root")
+
+    store.applyV2({
+      id: "evt_promoted",
+      created: 1,
+      type: "session.next.prompted",
+      data: {
+        sessionID: "root",
+        messageID: "msg_user",
+        timestamp: 1,
+        delivery: "steer",
+        prompt: { text: "hello" },
+      },
+    } as OpenCodeEvent)
+    store.applyV2({
+      id: "evt_step",
+      created: 2,
+      type: "session.next.step.started",
+      data: {
+        sessionID: "root",
+        assistantMessageID: "msg_assistant",
+        agent: "build",
+        model: { id: "model", providerID: "provider" },
+      },
+    } as OpenCodeEvent)
+
+    expect(store.data.message.root?.map((message) => message.id)).toEqual(["msg_user", "msg_assistant"])
+
+    await store.sync("root", { force: true })
+
+    expect(store.data.message.root?.map((message) => message.id)).toEqual(["msg_user", "msg_assistant"])
+    expect(store.data.session_message.root?.map((message) => message.id)).toContain("msg_user")
+  })
+
   test("backfills an assistant-only initial page through its user root", async () => {
     const user = userMessage("message-1")
     const assistants = [assistantMessage("message-2", user.id), assistantMessage("message-3", user.id)]

@@ -3,6 +3,15 @@ import { createStore } from "solid-js/store"
 import { Dynamic } from "solid-js/web"
 import { makeEventListener } from "@solid-primitives/event-listener"
 import type { FileSearchHandle } from "@opencode-ai/session-ui/file"
+import {
+  applyBufferTransactions,
+  createPatchStream,
+  matchesFilePath,
+  pushPatchDelta,
+  streamDelta,
+  streamKey,
+  type PatchStreamState,
+} from "@opencode-ai/session-ui/apply-patch-file"
 import { useFileComponent } from "@opencode-ai/ui/context/file"
 import { cloneSelectedLineRange, previewSelectedLines } from "@opencode-ai/session-ui/pierre/selection-bridge"
 import { createLineCommentController } from "@opencode-ai/session-ui/line-comment-annotations"
@@ -15,6 +24,7 @@ import { MenuV2 } from "@opencode-ai/ui/v2/menu-v2"
 import { Tabs } from "@opencode-ai/ui/tabs"
 import { ScrollView } from "@opencode-ai/ui/scroll-view"
 import { showToast } from "@/utils/toast"
+import { useServerSDK } from "@/context/server-sdk"
 import { selectionFromLines, useFile, type FileSelection, type SelectedLineRange } from "@/context/file"
 import { useComments } from "@/context/comments"
 import { useLanguage } from "@/context/language"
@@ -23,6 +33,7 @@ import { useSettings } from "@/context/settings"
 import { getSessionHandoff } from "@/pages/session/handoff"
 import { useSessionLayout } from "@/pages/session/session-layout"
 import { createSessionTabs } from "@/pages/session/helpers"
+import { eventSessionID } from "@/context/file/mutation-events"
 
 type SessionFileViewProps = {
   tab: string
@@ -223,6 +234,44 @@ export function SessionFileView(props: SessionFileViewProps) {
   )
 }
 
+function createLiveFileContents(path: () => string | undefined, disk: () => string) {
+  const serverSDK = useServerSDK()
+  const { params } = useSessionLayout()
+  const [overlay, setOverlay] = createSignal<string>()
+  const streams = new Map<string, PatchStreamState>()
+
+  const reset = () => {
+    streams.clear()
+    setOverlay(undefined)
+  }
+
+  createEffect(on(() => path(), reset, { defer: true }))
+  createEffect(on(() => disk(), reset, { defer: true }))
+
+  const stop = serverSDK().event.listen((e) => {
+    const sessionID = params.id
+    const eventSession = eventSessionID(e)
+    if (sessionID && eventSession && eventSession !== sessionID) return
+    const delta = streamDelta(e.details)
+    if (!delta) return
+    const filePath = path()
+    if (!filePath) return
+    const key = streamKey(e.details) ?? filePath
+    const next = pushPatchDelta(streams.get(key) ?? createPatchStream(), delta)
+    streams.set(key, next)
+    const txs = next.transactions.filter((tx) => matchesFilePath(tx.path, filePath))
+    if (txs.length === 0) return
+    setOverlay(applyBufferTransactions(disk(), txs))
+  })
+  onCleanup(stop)
+
+  return createMemo(() => {
+    const next = overlay()
+    if (next !== undefined) return next
+    return disk()
+  })
+}
+
 function SessionFileViewV1(props: { tab: string }) {
   const file = useFile()
   const comments = useComments()
@@ -250,7 +299,13 @@ function SessionFileViewV1(props: { tab: string }) {
     if (!p) return
     return file.get(p)
   })
-  const contents = createMemo(() => state()?.content?.content ?? "")
+  createEffect(() => {
+    const p = path()
+    if (!p) return
+    void file.load(p)
+  })
+  const disk = createMemo(() => state()?.content?.content ?? "")
+  const contents = createLiveFileContents(path, disk)
   const cacheKey = createMemo(() => sampledChecksum(contents()))
   const selectedLines = createMemo<SelectedLineRange | null>(() => {
     const p = path()
@@ -447,7 +502,7 @@ function SessionFileViewV1(props: { tab: string }) {
   })
 
   const renderFile = (source: string) => (
-    <div class="relative overflow-hidden pb-40">
+    <div class="relative overflow-hidden pb-40" data-file-buffer={path() ?? ""} data-editor="buffer">
       <Dynamic
         component={fileComponent}
         mode="text"
@@ -495,7 +550,7 @@ function SessionFileViewV1(props: { tab: string }) {
     <div class="mt-3 relative h-full min-h-0">
       <ScrollView class="h-full" viewportRef={scrollSync.setViewport} onScroll={scrollSync.handleScroll as any}>
         <Switch>
-          <Match when={state()?.loaded}>{renderFile(contents())}</Match>
+          <Match when={state()?.loaded || contents()}>{renderFile(contents())}</Match>
           <Match when={state()?.loading}>
             <div class="px-6 py-4 text-text-weak">{language.t("common.loading")}...</div>
           </Match>
@@ -535,7 +590,13 @@ function SessionFileViewV2(props: { tab: string }) {
     if (!p) return
     return file.get(p)
   })
-  const contents = createMemo(() => state()?.content?.content ?? "")
+  createEffect(() => {
+    const p = path()
+    if (!p) return
+    void file.load(p)
+  })
+  const disk = createMemo(() => state()?.content?.content ?? "")
+  const contents = createLiveFileContents(path, disk)
   const cacheKey = createMemo(() => sampledChecksum(contents()))
   const selectedLines = createMemo<SelectedLineRange | null>(() => {
     const p = path()
@@ -730,7 +791,7 @@ function SessionFileViewV2(props: { tab: string }) {
   })
 
   const renderFile = (source: string) => (
-    <div class="relative overflow-hidden pb-40">
+    <div class="relative overflow-hidden pb-40" data-file-buffer={path() ?? ""} data-editor="buffer">
       <Dynamic
         component={fileComponent}
         mode="text"
@@ -786,7 +847,7 @@ function SessionFileViewV2(props: { tab: string }) {
     <div class="mt-3 relative h-full min-h-0">
       <ScrollView class="h-full" viewportRef={scrollSync.setViewport} onScroll={scrollSync.handleScroll as any}>
         <Switch>
-          <Match when={state()?.loaded}>{renderFile(contents())}</Match>
+          <Match when={state()?.loaded || contents()}>{renderFile(contents())}</Match>
           <Match when={state()?.loading}>
             <div class="px-6 py-4 text-text-weak">{language.t("common.loading")}...</div>
           </Match>

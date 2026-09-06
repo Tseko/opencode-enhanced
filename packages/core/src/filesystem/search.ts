@@ -16,6 +16,7 @@ export interface Interface {
   readonly find: (input: FileSystem.FindInput) => Effect.Effect<FileSystem.Entry[]>
   readonly glob: (input: FileSystem.GlobInput) => Effect.Effect<readonly FileSystem.Entry[]>
   readonly grep: (input: FileSystem.GrepInput) => Effect.Effect<readonly FileSystem.Match[]>
+  readonly reindex: (input: { file: string; event: "add" | "change" | "unlink" }) => Effect.Effect<void>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/FileSystem/Search") {}
@@ -27,10 +28,7 @@ export const ripgrepLayer = Layer.effect(
     const location = yield* Location.Service
     const ripgrep = yield* Ripgrep.Service
     const scope = yield* Scope.Scope
-    const state = {
-      files: [] as string[],
-      directories: [] as string[],
-    }
+    const files = new Set<string>()
     const directories = new Set<string>()
     yield* ripgrep
       .find({
@@ -39,14 +37,29 @@ export const ripgrepLayer = Layer.effect(
         limit: location.vcs ? Number.MAX_SAFE_INTEGER : 100_000,
         onEntry: (entry) =>
           Effect.sync(() => {
-            state.files.push(entry.path)
+            files.add(entry.path)
             const parts = entry.path.split("/")
-            parts.slice(0, -1).forEach((_, index) => directories.add(parts.slice(0, index + 1).join("/") + path.sep))
-            state.directories = Array.from(directories)
+            parts.slice(0, -1).forEach((_, index) => directories.add(parts.slice(0, index + 1).join("/") + "/"))
           }),
       })
       .pipe(Effect.orDie, Effect.asVoid, Effect.forkIn(scope))
     return Service.of({
+      reindex: (input) =>
+        Effect.sync(() => {
+          const relative = path.relative(location.directory, input.file).replaceAll("\\", "/")
+          if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return
+          if (input.event === "unlink") {
+            files.delete(relative)
+            directories.delete(relative + "/")
+            for (const file of files) {
+              if (file.startsWith(`${relative}/`)) files.delete(file)
+            }
+            return
+          }
+          files.add(relative)
+          const parts = relative.split("/")
+          parts.slice(0, -1).forEach((_, index) => directories.add(parts.slice(0, index + 1).join("/") + "/"))
+        }),
       glob: (input) =>
         Effect.gen(function* () {
           const target = path.resolve(location.directory, input.path ?? ".")
@@ -102,13 +115,13 @@ export const ripgrepLayer = Layer.effect(
         Effect.gen(function* () {
           const items =
             input.type === "file"
-              ? state.files
+              ? Array.from(files)
               : input.type === "directory"
-                ? state.directories
-                : [...state.files, ...state.directories]
+                ? Array.from(directories)
+                : [...files, ...directories]
           return fuzzysort.go(input.query, items, { limit: input.limit ?? 50 }).map((item) => {
             const relative = item.target
-            const type = relative.endsWith(path.sep) ? ("directory" as const) : ("file" as const)
+            const type = relative.endsWith("/") ? ("directory" as const) : ("file" as const)
             return FileSystem.Entry.make({
               path: RelativePath.make(relative),
               type,
@@ -129,7 +142,8 @@ export const fffLayer = Layer.effect(
           basePath: location.directory,
           aiMode: true,
           disableMmapCache: true,
-          disableContentIndexing: true,
+          disableContentIndexing: false,
+          disableWatch: true,
         }),
       catch: (cause) => cause,
     }).pipe(
@@ -141,10 +155,15 @@ export const fffLayer = Layer.effect(
         find: () => Effect.succeed([]),
         glob: () => Effect.succeed([]),
         grep: () => Effect.succeed([]),
+        reindex: () => Effect.void,
       })
     }
     yield* Effect.addFinalizer(() => Effect.sync(() => result.value.destroy()).pipe(Effect.ignore))
     return Service.of({
+      reindex: (input) =>
+        Effect.sync(() => {
+          result.value.indexPath(input.file, input.event)
+        }),
       glob: (input) =>
         Effect.sync(() => {
           const prefix = input.path?.replaceAll("\\", "/").replace(/\/$/, "")
@@ -163,29 +182,32 @@ export const fffLayer = Layer.effect(
       grep: (input) =>
         Effect.sync(() => {
           const prefix = input.path?.replaceAll("\\", "/").replace(/\/$/, "")
-          const found = result.value.grep(
-            [prefix ? `${prefix}/**` : undefined, input.include, input.pattern]
-              .filter((value) => value !== undefined)
-              .join(" "),
-            { mode: "regex", pageSize: input.limit, timeBudgetMs: 1_500 },
-          )
+          const found = result.value.grep(input.pattern, {
+            mode: "regex",
+            pageSize: input.limit,
+            timeBudgetMs: 1_500,
+          })
           if (!found.ok) throw found.error
-          return found.value.items.map((match) => {
+          return found.value.items.flatMap((match) => {
+            const relative = match.relativePath.replaceAll("\\", "/")
+            if (prefix && relative !== prefix && !relative.startsWith(`${prefix}/`)) return []
             const bytes = Buffer.from(match.lineContent)
-            return FileSystem.Match.make({
-              entry: FileSystem.Entry.make({
-                path: RelativePath.make(match.relativePath.replaceAll("\\", "/")),
-                type: "file",
+            return [
+              FileSystem.Match.make({
+                entry: FileSystem.Entry.make({
+                  path: RelativePath.make(relative),
+                  type: "file",
+                }),
+                line: match.lineNumber,
+                offset: match.byteOffset,
+                text: match.lineContent.length > 2_000 ? match.lineContent.slice(0, 2_000) + "..." : match.lineContent,
+                submatches: match.matchRanges.map(([start, end]) => ({
+                  text: bytes.subarray(start, end).toString("utf8"),
+                  start,
+                  end,
+                })),
               }),
-              line: match.lineNumber,
-              offset: match.byteOffset,
-              text: match.lineContent.length > 2_000 ? match.lineContent.slice(0, 2_000) + "..." : match.lineContent,
-              submatches: match.matchRanges.map(([start, end]) => ({
-                text: bytes.subarray(start, end).toString("utf8"),
-                start,
-                end,
-              })),
-            })
+            ]
           })
         }),
       find: (input) =>

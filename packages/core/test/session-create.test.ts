@@ -272,11 +272,12 @@ describe("SessionV2.create", () => {
           prompt: { text: "Replay lifecycle" },
           delivery: "steer",
           admittedSeq: 1,
-          promotedSeq: 2,
+          promotedSeq: 3,
         })
         expect(yield* store.context(created.id)).toMatchObject([
           { id: admitted.id, type: "user", text: "Replay lifecycle" },
         ])
+        expect(yield* store.get(created.id)).toMatchObject({ title: "Replay lifecycle" })
         expect(
           (yield* db
             .select()
@@ -288,7 +289,8 @@ describe("SessionV2.create", () => {
         ).toEqual([
           [0, EventV2.versionedType(SessionV1.Event.Created.type, 1)],
           [1, EventV2.versionedType(SessionEvent.PromptAdmitted.type, 1)],
-          [2, EventV2.versionedType(SessionEvent.Prompted.type, 1)],
+          [2, EventV2.versionedType(SessionV1.Event.Updated.type, 1)],
+          [3, EventV2.versionedType(SessionEvent.Prompted.type, 1)],
         ])
       }).pipe(Effect.provide(Layer.fresh(targetLayer)))
     }),
@@ -420,6 +422,83 @@ describe("SessionV2.create", () => {
             Effect.map((error) => error._tag),
           ),
       ).toBe("Session.NotFoundError")
+    }),
+  )
+
+  it.effect("names a default session from the first prompt words", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionV2.Service
+      const created = yield* session.create({ location })
+
+      yield* session.prompt({
+        sessionID: created.id,
+        prompt: Prompt.make({ text: "Add archive icon to the sidebar" }),
+        resume: false,
+      })
+
+      expect(yield* session.get(created.id)).toMatchObject({ title: "Add archive icon" })
+    }),
+  )
+
+  it.effect("names a still-default session from the first prompt on a later prompt", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      const created = yield* session.create({ location })
+      yield* session.prompt({
+        sessionID: created.id,
+        prompt: Prompt.make({ text: "Add archive icon to the sidebar" }),
+        resume: false,
+      })
+      const named = yield* session.get(created.id)
+      yield* events.publish(SessionV1.Event.Updated, {
+        sessionID: created.id,
+        info: SessionV1.SessionInfo.make({
+          id: created.id,
+          slug: "reset",
+          version: "test",
+          projectID: created.projectID,
+          directory: created.location.directory,
+          title: `New session - ${new Date(0).toISOString()}`,
+          time: { created: 0, updated: 1 },
+        }),
+      })
+
+      yield* session.prompt({
+        sessionID: created.id,
+        prompt: Prompt.make({ text: "Something else entirely" }),
+        resume: false,
+      })
+
+      expect(yield* session.get(created.id)).toMatchObject({ title: named.title })
+    }),
+  )
+
+  it.effect("keeps a custom session title when prompting", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      const created = yield* session.create({ location })
+      yield* events.publish(SessionV1.Event.Updated, {
+        sessionID: created.id,
+        info: SessionV1.SessionInfo.make({
+          id: created.id,
+          slug: "custom",
+          version: "test",
+          projectID: created.projectID,
+          directory: created.location.directory,
+          title: "Saved research",
+          time: { created: 0, updated: 1 },
+        }),
+      })
+
+      yield* session.prompt({
+        sessionID: created.id,
+        prompt: Prompt.make({ text: "Add archive icon to the sidebar" }),
+        resume: false,
+      })
+
+      expect(yield* session.get(created.id)).toMatchObject({ title: "Saved research" })
     }),
   )
 })

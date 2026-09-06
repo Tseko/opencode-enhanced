@@ -181,6 +181,57 @@ describe("bootstrapDirectory", () => {
 
     expect(store.status).toBe("complete")
   })
+
+  test("completes a v2 directory when MCP JSON routes are missing", async () => {
+    const [store, setStore] = directoryState()
+    const error = Object.assign(new Error("UnsupportedContentType"), { name: "ClientError" })
+
+    await bootstrapDirectory({
+      directory: "/project",
+      scope: ServerScope.local,
+      mcp: true,
+      global: {
+        config: {} satisfies Config,
+        path: { state: "", config: "", worktree: "/project", directory: "/project", home: "/home" },
+        project: [{ id: "project", worktree: "/project" } as Project],
+        provider,
+      },
+      sdk: {
+        config: {
+          get: async () => {
+            throw new Error("legacy directory config should not be called")
+          },
+        },
+      } as unknown as OpencodeClient,
+      api: {
+        ...api,
+        command: { list: async () => ({ location: {}, data: [] }) },
+        mcp: {
+          list: async () => {
+            throw error
+          },
+          resource: {
+            catalog: async () => {
+              throw error
+            },
+          },
+        },
+      } as unknown as ServerApi,
+      store,
+      setStore,
+      vcsCache: { setStore() {} } as unknown as VcsCache,
+      loadSessions() {},
+      translate: (key) => key,
+      queryClient: new QueryClient(),
+      protocol: Promise.resolve("v2"),
+    })
+
+    expect(store.status).toBe("partial")
+
+    await new Promise((resolve) => setTimeout(resolve, 80))
+
+    expect(store.status).toBe("complete")
+  })
 })
 
 describe("config queries", () => {

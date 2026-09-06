@@ -41,8 +41,14 @@ const APP_IDS = {
   prod: "ai.opencode.desktop",
 } as const
 
+const productName = process.env.OPENCODE_PRODUCT_NAME
+const isolateInstall = process.env.OPENCODE_ISOLATE_INSTALL === "1"
+const isolatedAppId = "ai.opencode.desktop.cursor"
+
 const getBase = (appId: string): Configuration => ({
-  artifactName: "opencode-desktop-${os}-${arch}.${ext}",
+  artifactName: process.env.OPENCODE_VERSION
+    ? "opencode-desktop-${os}-${arch}-${version}.${ext}"
+    : "opencode-desktop-${os}-${arch}.${ext}",
   directories: {
     output: "dist",
     buildResources: "resources",
@@ -54,6 +60,8 @@ const getBase = (appId: string): Configuration => ({
   // https://www.electron.build/docs/linux/
   extraMetadata: {
     desktopName: `${appId}.desktop`,
+    // Isolate Windows NSIS install dir from production (`@opencode-aidesktop`).
+    ...(productName || isolateInstall ? { name: "opencode-cursor" } : {}),
   },
   files: ["out/**/*", "resources/**/*", "!resources/opencode-cli*"],
   extraResources: [
@@ -121,13 +129,14 @@ const getBase = (appId: string): Configuration => ({
 function getConfig() {
   const appId = APP_IDS[channel]
   const base = getBase(appId)
+  const builderAppId = isolateInstall ? isolatedAppId : appId
 
   switch (channel) {
     case "dev": {
       return {
         ...base,
-        appId,
-        productName: "OpenCode Dev",
+        appId: builderAppId,
+        productName: productName ?? "OpenCode Dev",
         deb: { fpm: [metainfoFpm(appId)] },
         rpm: { packageName: "opencode-dev", fpm: [metainfoFpm(appId)] },
       }
@@ -135,8 +144,8 @@ function getConfig() {
     case "beta": {
       return {
         ...base,
-        appId,
-        productName: "OpenCode Beta",
+        appId: builderAppId,
+        productName: productName ?? "OpenCode Beta",
         protocols: { name: "OpenCode Beta", schemes: ["opencode"] },
         publish: { provider: "github", owner: "anomalyco", repo: "opencode-beta", channel: "latest" },
         deb: { fpm: [metainfoFpm(appId)] },
@@ -146,12 +155,21 @@ function getConfig() {
     case "prod": {
       return {
         ...base,
-        appId,
-        productName: "OpenCode",
+        appId: builderAppId,
+        productName: productName ?? "OpenCode",
         protocols: { name: "OpenCode", schemes: ["opencode"] },
         publish: { provider: "github", owner: "anomalyco", repo: "opencode", channel: "latest" },
         deb: { fpm: [metainfoFpm(appId), legacyDesktopEntryFpm] },
         rpm: { packageName: "opencode", fpm: [metainfoFpm(appId), legacyDesktopEntryFpm] },
+        ...(isolateInstall
+          ? {
+              nsis: {
+                ...base.nsis,
+                shortcutName: productName ?? "OpenCode Cursor",
+                uninstallDisplayName: productName ?? "OpenCode Cursor",
+              },
+            }
+          : {}),
       }
     }
   }
