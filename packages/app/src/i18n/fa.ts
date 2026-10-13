@@ -110,6 +110,8 @@ export const dict = {
   "command.category.workspace": "فضای کار",
   "command.category.settings": "تنظیمات",
   "command.logs.export": "صادرات سیاهههای مربوط",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "سیستم",
   "theme.scheme.light": "نور",
   "theme.scheme.dark": "تاریک",

@@ -201,6 +201,10 @@ export function createMainWindow(id: string = randomUUID()) {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // Keep session event streams flowing while the window is unfocused. Electron throttles
+      // timers, animation frames, and stream consumption for backgrounded renderers, which
+      // makes the UI replay a backlog of session updates the moment the window regains focus.
+      backgroundThrottling: false,
     },
   })
 

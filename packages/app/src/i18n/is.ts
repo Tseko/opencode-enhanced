@@ -113,6 +113,8 @@ export const dict = {
   "command.category.workspace": "Vinnurými",
   "command.category.settings": "Stillingar",
   "command.logs.export": "Flytja út atvikaskrár",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "Kerfi",
   "theme.scheme.light": "Ljóst",
   "theme.scheme.dark": "Dökkt",

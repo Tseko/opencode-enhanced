@@ -18,9 +18,9 @@ import { message as cleanMessage } from "@/utils/diffs"
 import { sessionNotFoundError } from "@/utils/server-errors"
 import { rootSession } from "@/utils/session-route"
 import { normalizeSessionInfo } from "@/utils/session"
-import { compareMessages, messageKey, normalizeSessionMessages } from "@/utils/session-message"
+import { compareMessages, messageKey, normalizeSessionMessages, sessionMessagePartID } from "@/utils/session-message"
 import { dropSessionCaches, pickSessionCacheEvictions, SESSION_CACHE_LIMIT } from "./global-sync/session-cache"
-import { createV2SessionReducer, currentV2Event, type V2SessionReduction } from "./server-session-v2-reducer"
+import { createV2SessionReducer, type V2SessionReduction } from "./server-session-v2-reducer"
 import type { ServerApi } from "@/utils/server"
 
 type MessageApi = ServerApi["message"]
@@ -221,6 +221,10 @@ export function createServerSession(
   const pendingParts = new Map<string, Map<string, Set<string>>>()
   const orphanParts = new Map<string, Set<string>>()
   const removedMessages = new Map<string, Set<string>>()
+  // Messages known to the V2 projection. Legacy V1 pages can be empty while
+  // V2 events carry the real timeline, so an empty complete page must not
+  // drop content that V2 events promoted.
+  const v2Live = new Map<string, Set<string>>()
   const deltaBases = new Map<string, { base: string; sessionID: string }>()
   const deleteMessageParts = (
     cache: { part: Record<string, Part[] | undefined>; part_text_accum_delta: Record<string, string | undefined> },
@@ -492,6 +496,7 @@ export function createServerSession(
       inflightTodo.delete(sessionID)
       messageLoads.delete(sessionID)
       v2.clear(sessionID)
+      v2Live.delete(sessionID)
       pendingParts.delete(sessionID)
       orphanParts.delete(sessionID)
       removedMessages.delete(sessionID)
@@ -814,9 +819,11 @@ export function createServerSession(
                 parents.map((parent) => ({ id: parent.message.id, part: parent.parts })),
               ),
             }
+      const live = v2Live.get(sessionID)
       const preserveLive =
         result.session.length === 0 &&
-        ((data.message[sessionID]?.length ?? 0) > 0 || (data.session_message[sessionID]?.length ?? 0) > 0)
+        live !== undefined &&
+        (data.message[sessionID]?.some((message) => live.has(message.id)) ?? false)
       const preserveUnfetched =
         mode === "prepend" ||
         preserveLive ||
@@ -893,6 +900,9 @@ export function createServerSession(
   const projectV2 = (reduction: V2SessionReduction) => {
     reduction.touched.forEach((messageID) => messageLoads.get(reduction.sessionID)?.touchedSource.add(messageID))
     setData("session_message", reduction.sessionID, reconcile(reduction.messages))
+    const live = v2Live.get(reduction.sessionID) ?? new Set<string>()
+    reduction.messages.forEach((message) => live.add(message.id))
+    v2Live.set(reduction.sessionID, live)
     if (reduction.touched.length === 0) return
 
     const touched = new Set(reduction.touched)
@@ -943,14 +953,56 @@ export function createServerSession(
       .catch(() => {})
   }
 
+  const applyV2LiveDelta = (current: OpenCodeEvent) => {
+    if (current.type !== "session.text.delta" && current.type !== "session.reasoning.delta") return false
+    if (!("data" in current)) return false
+    const payload = current.data
+    if (!("sessionID" in payload) || typeof payload.sessionID !== "string") return false
+    if (!("assistantMessageID" in payload) || typeof payload.assistantMessageID !== "string") return false
+    if (!("ordinal" in payload) || typeof payload.ordinal !== "number") return false
+    if (!("delta" in payload) || typeof payload.delta !== "string") return false
+    const sessionID = payload.sessionID
+    const messageID = payload.assistantMessageID
+    const ordinal = payload.ordinal
+    const delta = payload.delta
+    const kind = current.type === "session.reasoning.delta" ? "reasoning" : "text"
+    const message = data.session_message[sessionID]?.find((item) => item.id === messageID)
+    if (!message || message.type !== "assistant") return false
+    const item = message.content.filter((content) => content.type === kind)[ordinal]
+    if (!item) return false
+    const partID = sessionMessagePartID(messageID, kind, ordinal)
+    const parts = data.part[messageID]
+    if (!parts || !Binary.search(parts, partID, (part) => part.id).found) return false
+    setData(
+      "session_message",
+      sessionID,
+      produce((draft) => {
+        if (!draft) return
+        const next = draft.find((value) => value.id === messageID)
+        if (!next || next.type !== "assistant") return
+        const content = next.content.filter((value) => value.type === kind)[ordinal]
+        if (!content) return
+        if (content.type !== "text" && content.type !== "reasoning") return
+        content.text += delta
+      }),
+    )
+    apply({
+      type: "message.part.delta",
+      properties: { sessionID, messageID, partID, field: "text", delta },
+    })
+    return true
+  }
+
   const applyV2 = (event: OpenCodeEvent) => {
-    const current = currentV2Event(event)
+    const current = v2.prepare(event)
     if (!("data" in current) || !("sessionID" in current.data) || typeof current.data.sessionID !== "string") return
     const sessionID = current.data.sessionID
-    const reduction = v2.reduce(data.session_message[sessionID] ?? [], current)
-    if (reduction) {
-      projectV2(reduction)
-      if (reduction.missing) hydrateV2Message(sessionID, reduction.missing)
+    if (!applyV2LiveDelta(current)) {
+      const reduction = v2.reduce(data.session_message[sessionID] ?? [], current)
+      if (reduction) {
+        projectV2(reduction)
+        if (reduction.missing) hydrateV2Message(sessionID, reduction.missing)
+      }
     }
 
     const info = data.info[sessionID]
@@ -1082,6 +1134,7 @@ export function createServerSession(
       }
       case "message.removed": {
         const props = event.properties as { sessionID: string; messageID: string }
+        v2Live.get(props.sessionID)?.delete(props.messageID)
         setData("session_message", props.sessionID, (messages) =>
           messages?.filter((message) => message.id !== props.messageID),
         )

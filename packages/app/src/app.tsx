@@ -57,19 +57,35 @@ import { SettingsProvider, useSettings } from "@/context/settings"
 import { TabsProvider, useTabs, type DraftTab } from "@/context/tabs"
 import { SDKProvider, useSDK } from "@/context/sdk"
 import { WslServersProvider } from "@/wsl/context"
-import DirectoryLayout, { DirectoryDataProvider } from "@/pages/directory-layout"
-import LegacyLayout from "@/pages/layout"
-import NewLayout from "@/pages/layout-new"
+import { DirectoryDataProvider } from "@/pages/directory-data-provider"
 import { ErrorPage } from "./pages/error"
 import { useCheckServerHealth } from "./utils/server-health"
 import { legacySessionHref, legacySessionServer, requireServerKey, sessionHref } from "./utils/session-route"
 import { createSessionLineage } from "@/pages/session/session-lineage"
+import { markStartupPreloaderReady } from "@/utils/startup-preloader"
 
-import { SessionPage, SessionRouteErrorBoundary, TargetSessionRouteContent } from "@/pages/session"
-import { NewHome } from "@/pages/home"
-import { LegacyHome } from "@/pages/home/legacy-home"
+function lazyRoute<T extends Component>(load: () => Promise<{ default: T }>) {
+  return lazy(async () => {
+    const module = await load()
+    markStartupPreloaderReady()
+    return module
+  })
+}
 
-const NewSession = lazy(() => import("@/pages/new-session"))
+const DirectoryLayout = lazyRoute(() => import("@/pages/directory-layout"))
+const LegacyLayout = lazyRoute(() => import("@/pages/layout"))
+const NewLayout = lazyRoute(() => import("@/pages/layout-new"))
+const SessionPage = lazyRoute(() => import("@/pages/session").then((module) => ({ default: module.SessionPage })))
+const SessionRouteErrorBoundary = lazyRoute(() =>
+  import("@/pages/session").then((module) => ({ default: module.SessionRouteErrorBoundary })),
+)
+const TargetSessionRouteContent = lazyRoute(() =>
+  import("@/pages/session").then((module) => ({ default: module.TargetSessionRouteContent })),
+)
+const NewHome = lazyRoute(() => import("@/pages/home").then((module) => ({ default: module.NewHome })))
+const LegacyHome = lazyRoute(() => import("@/pages/home/legacy-home").then((module) => ({ default: module.LegacyHome })))
+
+const NewSession = lazyRoute(() => import("@/pages/new-session"))
 
 const SessionRoute = () => {
   const settings = useSettings()
@@ -409,6 +425,7 @@ export function AppBaseProviders(
             <ErrorBoundary
               fallback={(error) => {
                 Sentry.captureException(error)
+                markStartupPreloaderReady()
                 return <ErrorPage error={error} />
               }}
             >
@@ -467,6 +484,11 @@ function ConnectionGate(props: ParentProps<{ disableHealthCheck?: boolean; start
     () => startupHealthCheck.latest === true && ["unresolved", "pending"].includes(startup.state),
   )
   const loading = createMemo(() => checking() || startupChecking())
+
+  createEffect(() => {
+    if (loading()) return
+    if (startupHealthCheck.latest !== true) markStartupPreloaderReady()
+  })
 
   return (
     <>

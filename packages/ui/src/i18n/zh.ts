@@ -3,6 +3,18 @@ import { dict as en } from "./en"
 type Keys = keyof typeof en
 
 export const dict = {
+  "ui.messagePart.tools.command.active.one": "Running {{count}} command",
+  "ui.messagePart.tools.command.active.other": "Running {{count}} commands",
+  "ui.messagePart.tools.command.done.one": "Ran {{count}} command",
+  "ui.messagePart.tools.command.done.other": "Ran {{count}} commands",
+  "ui.messagePart.tools.edit.active.one": "Making {{count}} edit",
+  "ui.messagePart.tools.edit.active.other": "Making {{count}} edits",
+  "ui.messagePart.tools.edit.done.one": "Made {{count}} edit",
+  "ui.messagePart.tools.edit.done.other": "Made {{count}} edits",
+  "ui.messagePart.tools.generic.active.one": "Using {{count}} tool",
+  "ui.messagePart.tools.generic.active.other": "Using {{count}} tools",
+  "ui.messagePart.tools.generic.done.one": "Used {{count}} tool",
+  "ui.messagePart.tools.generic.done.other": "Used {{count}} tools",
   "ui.sessionReview.title": "会话变更",
   "ui.sessionReview.title.git": "Git 变更",
   "ui.sessionReview.title.branch": "分支变更",

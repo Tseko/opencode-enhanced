@@ -4,6 +4,17 @@ type Assistant = Extract<SessionMessageInfo, { type: "assistant" }>
 type Compaction = Extract<SessionMessageInfo, { type: "compaction" }>
 type Shell = Extract<SessionMessageInfo, { type: "shell" }>
 type EventData = Record<string, unknown>
+// Legacy servers still emit session.next.* events with versioned suffixes
+// (e.g. "session.next.text.delta.1") instead of the typed V2 event names.
+type IncomingEvent = {
+  id?: string
+  created?: number
+  metadata?: Record<string, unknown>
+  type: string
+  data?: unknown
+  properties?: unknown
+  [key: string]: unknown
+}
 
 export type V2SessionReduction = {
   sessionID: string
@@ -12,23 +23,25 @@ export type V2SessionReduction = {
   missing?: string
 }
 
-export function currentV2Event(event: OpenCodeEvent): OpenCodeEvent {
+export function currentV2Event(event: OpenCodeEvent | IncomingEvent): OpenCodeEvent {
   const payload = eventPayload(event)
-  if (!payload) return event
+  if (!payload) return event as OpenCodeEvent
   const created = eventCreated(event, payload)
-  const type = typeof event.type === "string" ? event.type.replace(/\.\d+$/, "") : event.type
-  if (typeof type !== "string" || !type.startsWith("session.next."))
+  const type = event.type.replace(/\.\d+$/, "")
+  if (!type.startsWith("session.next."))
     return withCreated({ ...event, type, data: payload } as OpenCodeEvent, created)
   const mapped = mappedSessionType(type)
-  return withCreated({ ...event, type: mapped, data: reshapeSessionData(mapped, payload) }, created)
+  return withCreated({ ...event, type: mapped, data: reshapeSessionData(mapped, payload) } as OpenCodeEvent, created)
 }
 
 export function createV2SessionReducer() {
   const pending = new Map<string, SessionPendingMessage>()
   const ordinals = new Map<string, number>()
 
+  const prepare = (raw: OpenCodeEvent) => withFragmentOrdinal(ordinals, currentV2Event(raw))
+
   const reduce = (source: readonly SessionMessageInfo[], raw: OpenCodeEvent): V2SessionReduction | undefined => {
-    const event = withFragmentOrdinal(ordinals, currentV2Event(raw))
+    const event = prepare(raw)
     if (!("data" in event) || !("sessionID" in event.data) || typeof event.data.sessionID !== "string") return
     const sessionID = event.data.sessionID
     const result = (messages: SessionMessageInfo[], touched: string[] = []): V2SessionReduction => ({
@@ -422,6 +435,7 @@ export function createV2SessionReducer() {
 
   return {
     reduce,
+    prepare,
     clear(sessionID: string) {
       for (const id of pending.keys()) {
         if (id.startsWith(`${sessionID}:`)) pending.delete(id)
@@ -443,10 +457,10 @@ function mappedSessionType(type: string) {
   return current.replace(/^session\.next\./, "session.")
 }
 
-function eventPayload(event: OpenCodeEvent) {
-  if ("data" in event && event.data && typeof event.data === "object") return { ...(event.data as EventData) }
+function eventPayload(event: IncomingEvent) {
+  if (typeof event.data === "object" && event.data) return { ...(event.data as EventData) }
   if (!("properties" in event)) return
-  const properties = record((event as { properties?: unknown }).properties)
+  const properties = record(event.properties)
   if (properties) return { ...properties }
 }
 
@@ -490,18 +504,33 @@ function reshapeSessionData(type: string, data: EventData): EventData {
   return data
 }
 
-function promotedInput(data: { prompt?: { text?: string }; delivery?: string; input?: SessionPendingMessage }) {
-  if (data.input) return data.input
-  if (!data.prompt || typeof data.prompt.text !== "string") return
+function promotedInput(data: EventData): SessionPendingMessage | undefined {
+  if (isSessionPendingMessage(data.input)) return data.input
+  const prompt = record(data.prompt)
+  if (!prompt || typeof prompt.text !== "string") return
+  const userData: Extract<SessionPendingMessage, { type: "user" }>["data"] = {
+    text: prompt.text,
+    files: prompt.files as Extract<SessionPendingMessage, { type: "user" }>["data"]["files"],
+    agents: prompt.agents as Extract<SessionPendingMessage, { type: "user" }>["data"]["agents"],
+    metadata: prompt.metadata as Extract<SessionPendingMessage, { type: "user" }>["data"]["metadata"],
+  }
   return {
     type: "user" as const,
     delivery: data.delivery === "queue" ? ("queue" as const) : ("steer" as const),
-    data: data.prompt,
+    data: userData,
   }
 }
 
-function withFragmentOrdinal(ordinals: Map<string, number>, event: OpenCodeEvent): OpenCodeEvent {
-  if (!("data" in event) || !event.data || typeof event.data !== "object") return event
+function isSessionPendingMessage(value: unknown): value is SessionPendingMessage {
+  if (!value || typeof value !== "object") return false
+  const item = value as { type?: unknown; data?: unknown; delivery?: unknown }
+  if (item.type !== "user" && item.type !== "synthetic") return false
+  if (!item.data || typeof item.data !== "object") return false
+  return item.delivery === "steer" || item.delivery === "queue"
+}
+
+function withFragmentOrdinal(ordinals: Map<string, number>, event: IncomingEvent): OpenCodeEvent {
+  if (typeof event.data !== "object" || !event.data) return event as OpenCodeEvent
   if (
     event.type !== "session.text.started" &&
     event.type !== "session.text.delta" &&
@@ -510,12 +539,12 @@ function withFragmentOrdinal(ordinals: Map<string, number>, event: OpenCodeEvent
     event.type !== "session.reasoning.delta" &&
     event.type !== "session.reasoning.ended"
   )
-    return event
+    return event as OpenCodeEvent
   const data = event.data as EventData
-  if (typeof data.ordinal === "number") return event
+  if (typeof data.ordinal === "number") return event as OpenCodeEvent
   const kind = event.type.startsWith("session.text.") ? "text" : "reasoning"
   const id = kind === "text" ? data.textID : data.reasoningID
-  if (typeof id !== "string" || typeof data.assistantMessageID !== "string") return event
+  if (typeof id !== "string" || typeof data.assistantMessageID !== "string") return event as OpenCodeEvent
   const key = `${data.assistantMessageID}:${kind}:${id}`
   const existing = ordinals.get(key)
   const ordinal =
@@ -525,7 +554,7 @@ function withFragmentOrdinal(ordinals: Map<string, number>, event: OpenCodeEvent
   return { ...event, data: { ...data, ordinal } } as OpenCodeEvent
 }
 
-function eventCreated(event: OpenCodeEvent, data: EventData) {
+function eventCreated(event: IncomingEvent, data: EventData) {
   if ("created" in event && typeof event.created === "number") return event.created
   if (typeof data.timestamp === "number") return data.timestamp
   return Date.now()

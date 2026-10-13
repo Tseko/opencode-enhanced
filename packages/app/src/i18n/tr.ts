@@ -122,6 +122,8 @@ export const dict = {
   "command.category.settings": "Ayarlar",
   "command.logs.export": "Günlükleri dışa aktar",
 
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "Sistem",
   "theme.scheme.light": "Açık",
   "theme.scheme.dark": "Koyu",

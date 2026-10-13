@@ -109,6 +109,8 @@ export const dict = {
   "command.category.workspace": "Tööruum",
   "command.category.settings": "Seaded",
   "command.logs.export": "Ekspordi logid",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "Süsteem",
   "theme.scheme.light": "Valgus",
   "theme.scheme.dark": "Tume",

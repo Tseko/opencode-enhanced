@@ -1,4 +1,4 @@
-import { Effect, Layer, LayerMap } from "effect"
+import { Cause, Context, Effect, Layer, LayerMap } from "effect"
 import { AgentV2 } from "./agent"
 import { AISDK } from "./aisdk"
 import { Catalog } from "./catalog"
@@ -22,6 +22,7 @@ import { Policy } from "./policy"
 import { ProjectCopy } from "./project/copy"
 import { Pty } from "./pty"
 import { QuestionV2 } from "./question"
+import { Readiness } from "./readiness"
 import { Reference } from "./reference"
 import { ReferenceGuidance } from "./reference/guidance"
 import * as SessionRunnerLLM from "./session/runner/llm"
@@ -33,6 +34,7 @@ import { Snapshot } from "./snapshot"
 import { SystemContextBuiltIns } from "./system-context/builtins"
 import { SystemContextRegistry } from "./system-context/registry"
 import { BuiltInTools } from "./tool/builtins"
+import { DynamicTools } from "./tool/dynamic-tools"
 import { ReadToolFileSystem } from "./tool/read-filesystem"
 import { ToolRegistry } from "./tool/registry"
 import { ToolOutputStore } from "./tool-output-store"
@@ -73,6 +75,7 @@ export const locationServices = LayerNode.group([
   QuestionV2.node,
   ReadToolFileSystem.node,
   BuiltInTools.node,
+  DynamicTools.node,
   SessionRunnerModel.node,
   Snapshot.node,
   SessionRunnerLLM.node,
@@ -94,16 +97,36 @@ export function buildLocationServiceMap(
         // Project), and the hoist walk is the only pass that can still slice
         // those back out.
         const location = LayerNode.hoist(locationServices, Node.tags.values.global, allReplacements)
+        Readiness.building(ref)
 
         return LayerNode.compile(location.node).pipe(
           Layer.fresh,
-          Layer.tap(() =>
-            Effect.logInfo("booting location services", {
-              directory: ref.directory,
-              workspaceID: ref.workspaceID,
+          // Readiness is written from inside the built graph, so a record can only ever
+          // describe services that actually built. The drain asserts it again before it
+          // runs; a future worker model can await it before dispatch.
+          Layer.tap((context) =>
+            Effect.gen(function* () {
+              yield* Effect.logInfo("booting location services", {
+                directory: ref.directory,
+                workspaceID: ref.workspaceID,
+              })
+              const tools = Context.get(context, ToolRegistry.Service)
+              const stats = yield* tools.stats()
+              Readiness.ready(ref, {
+                registryEpoch: stats.epoch,
+                registryHash: stats.hash,
+              })
             }),
           ),
           Layer.provide(LayerNode.compile(location.hoisted)),
+          // After `provide`, so a failure on either side of the build barrier is recorded.
+          // Interruption is not a failure: a build cancelled by scope closure leaves the
+          // previous record alone.
+          Layer.tapCause((cause) =>
+            Cause.hasInterruptsOnly(cause)
+              ? Effect.void
+              : Effect.sync(() => Readiness.failed(ref, Cause.pretty(cause))),
+          ),
         )
       },
       { idleTimeToLive: "60 minutes" },

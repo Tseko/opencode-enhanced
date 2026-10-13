@@ -132,7 +132,7 @@ export const Playground = {
           </style>
         )}
 
-        {/* Matches context-tool-group-trigger layout from message-part.tsx */}
+        {/* Matches tool-group-trigger layout from message-part.tsx */}
         <span
           data-reduced-motion={reducedMotion()}
           style={{

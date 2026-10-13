@@ -269,6 +269,7 @@ const WorkspaceSessionList = (props: {
           mobile={props.mobile}
           showChild
           sidebarExpanded={props.ctx.sidebarExpanded}
+          sidebarHovering={props.ctx.sidebarHovering}
           clearHoverProjectSoon={props.ctx.clearHoverProjectSoon}
           prefetchSession={props.ctx.prefetchSession}
           archiveSession={props.ctx.archiveSession}

@@ -118,6 +118,8 @@ export const dict = {
   "command.category.settings": "Postavke",
   "command.logs.export": "Izvezi zapisnike",
 
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "Sistem",
   "theme.scheme.light": "Svijetlo",
   "theme.scheme.dark": "Tamno",

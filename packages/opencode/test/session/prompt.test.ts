@@ -10,6 +10,7 @@ import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer } from "effect"
 import path from "path"
 import { fileURLToPath } from "url"
 import { NamedError } from "@opencode-ai/core/util/error"
+import { TURN_LIMIT_REASON } from "@opencode-ai/core/session/runner/max-steps"
 import { Agent as AgentSvc } from "../../src/agent/agent"
 import { BackgroundJob } from "@/background/job"
 import { Command } from "../../src/command"
@@ -672,6 +673,42 @@ it.instance("loop surfaces content-filter finishes as session errors", () =>
       expect.arrayContaining([expect.objectContaining({ type: "text", text: "partial response" })]),
     )
   }),
+)
+
+it.instance("loop marks an exhausted step limit as a turn limit, not a completed turn", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig((url) => ({
+      ...providerCfg(url),
+      agent: { build: { steps: 1 } },
+    }))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Pinned" })
+
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "hello" }],
+    })
+    yield* llm.text("I reached the maximum steps for this agent.")
+
+    const result = yield* prompt.loop({ sessionID: chat.id })
+    const stored = yield* MessageV2.get({ sessionID: chat.id, messageID: result.info.id })
+    const expected = {
+      name: "UnknownError",
+      data: { message: TURN_LIMIT_REASON },
+    } satisfies NonNullable<SessionV1.Assistant["error"]>
+
+    expect(yield* llm.hits).toHaveLength(1)
+    expect(result.info.role).toBe("assistant")
+    expect(stored.info.role).toBe("assistant")
+    if (result.info.role === "assistant" && stored.info.role === "assistant") {
+      expect(result.info.error).toEqual(expected)
+      expect(stored.info.error).toEqual(result.info.error)
+    }
+  }),
+  30_000,
 )
 
 it.instance("loop stops provider overflow instead of auto-compacting when disabled", () =>

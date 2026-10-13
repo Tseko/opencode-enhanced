@@ -111,6 +111,8 @@ export const dict = {
   "command.category.workspace": "İş sahəsi",
   "command.category.settings": "Tənzimləmələr",
   "command.logs.export": "Jurnalları ixrac et",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "Sistem",
   "theme.scheme.light": "Açıq",
   "theme.scheme.dark": "Tünd",

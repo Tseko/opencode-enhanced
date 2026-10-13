@@ -1,25 +1,25 @@
 import { TimelineRow } from "./timeline-row"
 
-type ContextRow = Extract<TimelineRow.TimelineRow, { _tag: "AssistantPart" }>
-type PriorContext = { index: number; row: ContextRow }
+type GroupedRow = Extract<TimelineRow.TimelineRow, { _tag: "AssistantPart" }>
+type PriorGroup = { index: number; row: GroupedRow }
 
 export function reuseTimelineRows(previous: TimelineRow.TimelineRow[] | undefined, rows: TimelineRow.TimelineRow[]) {
   if (!previous?.length) return rows
   const byKey = new Map(previous.map((row) => [TimelineRow.key(row), row] as const))
-  const contextByPart = new Map<string, PriorContext>()
+  const groupByPart = new Map<string, PriorGroup>()
   previous.forEach((row, index) => {
-    if (row._tag !== "AssistantPart" || row.group.type !== "context") return
-    row.group.refs.forEach((ref) => contextByPart.set(`${row.userMessageID}:${ref.partID}`, { index, row }))
+    if (row._tag !== "AssistantPart" || row.group.type !== "tool") return
+    row.group.refs.forEach((ref) => groupByPart.set(`${row.userMessageID}:${ref.partID}`, { index, row }))
   })
   const reserved = new Map<string, number>()
   rows.forEach((row, index) => {
-    if (row._tag !== "AssistantPart" || row.group.type !== "context") return
+    if (row._tag !== "AssistantPart" || row.group.type !== "tool") return
     const key = TimelineRow.key(row)
     if (byKey.has(key) && !reserved.has(key)) reserved.set(key, index)
   })
   const claimed = new Set<string>()
   const next = rows.map((input, index) => {
-    const row = stabilizeContextKey(contextByPart, reserved, input, index, claimed)
+    const row = stabilizeGroupKey(groupByPart, reserved, input, index, claimed)
     const existing = byKey.get(TimelineRow.key(row))
     if (!existing) return row
     return TimelineRow.equals(existing, row) ? existing : row
@@ -28,17 +28,20 @@ export function reuseTimelineRows(previous: TimelineRow.TimelineRow[] | undefine
   return next
 }
 
-function stabilizeContextKey(
-  contextByPart: Map<string, PriorContext>,
+function stabilizeGroupKey(
+  groupByPart: Map<string, PriorGroup>,
   reserved: Map<string, number>,
   row: TimelineRow.TimelineRow,
   rowIndex: number,
   claimed: Set<string>,
 ) {
-  if (row._tag !== "AssistantPart" || row.group.type !== "context") return row
-  const existing = row.group.refs.reduce<PriorContext | undefined>((result, ref) => {
-    const candidate = contextByPart.get(`${row.userMessageID}:${ref.partID}`)
+  if (row._tag !== "AssistantPart") return row
+  const group = row.group
+  if (group.type !== "tool") return row
+  const existing = group.refs.reduce<PriorGroup | undefined>((result, ref) => {
+    const candidate = groupByPart.get(`${row.userMessageID}:${ref.partID}`)
     if (!candidate) return result
+    if (candidate.row.group.type !== "tool" || candidate.row.group.kind !== group.kind) return result
     const key = TimelineRow.key(candidate.row)
     if (claimed.has(key)) return result
     const owner = reserved.get(key)

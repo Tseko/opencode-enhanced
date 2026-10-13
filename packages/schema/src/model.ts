@@ -36,6 +36,7 @@ export const Cost = Schema.Struct({
   }).pipe(optional),
   input: Schema.Finite,
   output: Schema.Finite,
+  reasoning: Schema.Finite.pipe(optional),
   cache: Schema.Struct({
     read: Schema.Finite,
     write: Schema.Finite,

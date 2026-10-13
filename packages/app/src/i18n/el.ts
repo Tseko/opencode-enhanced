@@ -110,6 +110,8 @@ export const dict = {
   "command.category.workspace": "Χώρος εργασίας",
   "command.category.settings": "Ρυθμίσεις",
   "command.logs.export": "Εξαγωγή αρχείων καταγραφής",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "Σύστημα",
   "theme.scheme.light": "Φωτεινό",
   "theme.scheme.dark": "Σκούρο",

@@ -10,6 +10,7 @@ import { Agent } from "../agent/agent"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "@/config/config"
+import { TURN_LIMIT_REASON } from "@opencode-ai/core/session/runner/max-steps"
 import { Effect, Exit, Schema, Scope } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -136,6 +137,14 @@ export const TaskTool = Tool.define(
       const session = params.task_id
         ? yield* sessions.get(SessionID.make(params.task_id)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
         : undefined
+      // Resuming is only allowed into a subagent this session owns. Without the linkage check a
+      // caller could point `task_id` at an unrelated session and drive it with its own prompt,
+      // inheriting that session's transcript and permissions.
+      if (session && session.parentID !== ctx.sessionID) {
+        return yield* Effect.fail(
+          new Error(`task_id ${params.task_id} is not a subagent of this session; omit task_id to start a new one`),
+        )
+      }
       const childPermission = deriveSubagentSessionPermission({
         parentSessionPermission: parent.permission ?? [],
         subagent: next,
@@ -215,7 +224,8 @@ export const TaskTool = Tool.define(
             "message" in result.info.error.data && typeof result.info.error.data.message === "string"
               ? result.info.error.data.message
               : result.info.error.name
-          return yield* Effect.fail(new Error(`Subagent failed (task_id: ${nextSession.id}): ${message}`))
+          const reason = message === TURN_LIMIT_REASON ? ", reason: turn_limit" : ""
+          return yield* Effect.fail(new Error(`Subagent failed (task_id: ${nextSession.id}${reason}): ${message}`))
         }
         const failed = result.parts.findLast((item) => item.type === "tool" && item.state.status === "error")
         if (failed?.type === "tool" && failed.state.status === "error") {

@@ -1900,6 +1900,7 @@ export default function LegacyLayout(props: ParentProps) {
     sessionProps: {
       navList: currentSessions,
       sidebarExpanded,
+      sidebarHovering,
       clearHoverProjectSoon,
       prefetchSession,
       archiveSession,

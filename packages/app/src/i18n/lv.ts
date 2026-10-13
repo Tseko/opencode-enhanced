@@ -109,6 +109,8 @@ export const dict = {
   "command.category.workspace": "Darbtelpa",
   "command.category.settings": "Iestatījumi",
   "command.logs.export": "Eksportēt žurnālus",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "Sistēma",
   "theme.scheme.light": "Gaišs",
   "theme.scheme.dark": "Tumšs",

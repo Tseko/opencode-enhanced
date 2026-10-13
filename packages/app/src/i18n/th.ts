@@ -116,6 +116,8 @@ export const dict = {
   "command.category.settings": "การตั้งค่า",
   "command.logs.export": "ส่งออกบันทึก",
 
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "ระบบ",
   "theme.scheme.light": "สว่าง",
   "theme.scheme.dark": "มืด",

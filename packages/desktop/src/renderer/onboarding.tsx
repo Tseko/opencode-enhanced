@@ -7,14 +7,23 @@ export function DesktopFirstLaunchOnboarding(props: { initialUrl: string; onLoad
   const tabs = useTabs()
 
   onMount(() => {
-    void runFirstLaunchOnboarding().finally(props.onLoaded)
+    void runFirstLaunchOnboarding()
   })
 
   async function runFirstLaunchOnboarding() {
+    const ready = await Promise.all(
+      [server.ready.promise, tabs.ready.promise, tabs.recentReady.promise].map((p) => p ?? Promise.resolve()),
+    ).then(
+      () => true,
+      (error) => {
+        console.error("[desktop-onboarding] startup state failed", error)
+        return false
+      },
+    )
+    props.onLoaded()
+    if (!ready) return
+
     try {
-      await Promise.all(
-        [server.ready.promise, tabs.ready.promise, tabs.recentReady.promise].map((p) => p ?? Promise.resolve()),
-      )
       const existingInstall = await window.api.isOldLayoutEligible()
       settings.general.setOldLayoutEligible(existingInstall)
       settings.general.initializeAgentVisibility(existingInstall)

@@ -58,7 +58,7 @@ import { ButtonV2 } from "@opencode-ai/ui/v2/button-v2"
 import { TooltipV2 } from "@opencode-ai/ui/v2/tooltip-v2"
 import { Spinner } from "@opencode-ai/ui/spinner"
 import { TextShimmer } from "@opencode-ai/ui/text-shimmer"
-import { AnimatedCountList } from "./tool-count-summary"
+import { AnimatedCountList, type CountItem } from "./tool-count-summary"
 import { ToolStatusTitle } from "./tool-status-title"
 import { patchFiles } from "./apply-patch-file"
 import { partDefaultOpen } from "./part-default-open"
@@ -171,6 +171,9 @@ export interface MessageProps {
   showReasoningSummaries?: boolean
   useV2Actions?: boolean
   comments?: UserMessageComment[]
+  userMessageOpen?: boolean
+  onUserMessageOpenChange?: (open: boolean) => void
+  partIdentity?: boolean
 }
 
 export type SessionAction = (input: { sessionID: string; messageID: string }) => Promise<void> | void
@@ -605,6 +608,8 @@ function taskSession(
 }
 
 const CONTEXT_GROUP_TOOLS = new Set(["read", "glob", "grep", "list"])
+const COMMAND_GROUP_TOOLS = new Set(["bash", "shell"])
+const EDIT_GROUP_TOOLS = new Set(["edit", "write", "patch", "apply_patch"])
 const HIDDEN_TOOLS = new Set(["todowrite"])
 
 function list<T>(value: T[] | undefined | null, fallback: T[]) {
@@ -624,6 +629,8 @@ export type PartRef = {
   partID: string
 }
 
+export type ToolGroupKind = "context" | "command" | "edit" | "tool"
+
 export type PartGroup =
   | {
       key: string
@@ -632,7 +639,8 @@ export type PartGroup =
     }
   | {
       key: string
-      type: "context"
+      type: "tool"
+      kind: ToolGroupKind
       refs: PartRef[]
     }
 
@@ -648,7 +656,8 @@ function sameGroup(a: PartGroup, b: PartGroup) {
     if (b.type !== "part") return false
     return sameRef(a.ref, b.ref)
   }
-  if (b.type !== "context") return false
+  if (b.type !== "tool") return false
+  if (a.kind !== b.kind) return false
   if (a.refs.length !== b.refs.length) return false
   return a.refs.every((ref, i) => sameRef(ref, b.refs[i]!))
 }
@@ -663,33 +672,9 @@ export function sameGroups(a: readonly PartGroup[] | undefined, b: readonly Part
 export function groupParts(parts: { messageID: string; part: PartType }[]) {
   const result: PartGroup[] = []
   let start = -1
+  let kind: ToolGroupKind | undefined
 
-  const flush = (end: number) => {
-    if (start < 0) return
-    const first = parts[start]
-    const last = parts[end]
-    if (!first || !last) {
-      start = -1
-      return
-    }
-    result.push({
-      key: `context:${first.part.id}`,
-      type: "context",
-      refs: parts.slice(start, end + 1).map((item) => ({
-        messageID: item.messageID,
-        partID: item.part.id,
-      })),
-    })
-    start = -1
-  }
-
-  parts.forEach((item, index) => {
-    if (isContextGroupTool(item.part)) {
-      if (start < 0) start = index
-      return
-    }
-
-    flush(index - 1)
+  const appendPart = (item: (typeof parts)[number]) =>
     result.push({
       key: `part:${item.messageID}:${item.part.id}`,
       type: "part",
@@ -698,6 +683,51 @@ export function groupParts(parts: { messageID: string; part: PartType }[]) {
         partID: item.part.id,
       },
     })
+
+  const flush = (end: number) => {
+    if (start < 0 || !kind) return
+    const first = parts[start]
+    const last = parts[end]
+    if (!first || !last) {
+      start = -1
+      kind = undefined
+      return
+    }
+    const items = parts.slice(start, end + 1)
+    // Context lookups are useful as a compact unit even by themselves. Other
+    // activities only gain an outer disclosure when there is something to group.
+    if (kind !== "context" && items.length === 1) {
+      appendPart(first)
+      start = -1
+      kind = undefined
+      return
+    }
+    result.push({
+      key: `tool:${kind}:${first.part.id}`,
+      type: "tool",
+      kind,
+      refs: items.map((item) => ({
+        messageID: item.messageID,
+        partID: item.part.id,
+      })),
+    })
+    start = -1
+    kind = undefined
+  }
+
+  parts.forEach((item, index) => {
+    const next = toolGroupKind(item.part)
+    if (next) {
+      if (start >= 0 && kind !== next) flush(index - 1)
+      if (start < 0) {
+        start = index
+        kind = next
+      }
+      return
+    }
+
+    flush(index - 1)
+    appendPart(item)
   })
 
   flush(parts.length - 1)
@@ -767,15 +797,25 @@ export function AssistantParts(props: {
 
         return (
           <Switch>
-            <Match when={entryType() === "context"}>
+            <Match when={entryType() === "tool"}>
               {(() => {
+                const kind = createMemo(() => {
+                  const entry = entryAccessor()
+                  if (entry.type !== "tool") return "tool" as const
+                  return entry.kind
+                })
+                const refs = createMemo(() => {
+                  const entry = entryAccessor()
+                  if (entry.type !== "tool") return []
+                  return entry.refs
+                })
                 const parts = createMemo(
                   () => {
                     const entry = entryAccessor()
-                    if (entry.type !== "context") return emptyTools
+                    if (entry.type !== "tool") return emptyTools
                     return entry.refs
                       .map((ref) => part().get(ref.messageID)?.get(ref.partID))
-                      .filter((part): part is ToolPart => !!part && isContextGroupTool(part))
+                      .filter((part): part is ToolPart => !!part && isToolGroupPart(part, entry.kind))
                   },
                   emptyTools,
                   { equals: same },
@@ -784,7 +824,36 @@ export function AssistantParts(props: {
 
                 return (
                   <Show when={parts().length > 0}>
-                    <ContextToolGroup parts={parts()} busy={busy()} />
+                    <ToolGroup parts={parts()} kind={kind()} busy={busy()}>
+                      <Show when={kind() !== "context"}>
+                        <Index each={refs()}>
+                          {(refAccessor) => {
+                            const message = createMemo(() => msgs().get(refAccessor().messageID))
+                            const item = createMemo(() =>
+                              part().get(refAccessor().messageID)?.get(refAccessor().partID),
+                            )
+                            return (
+                              <Show when={message()}>
+                                <Show when={item()}>
+                                  <Part
+                                    part={item()!}
+                                    message={message()!}
+                                    showAssistantCopyPartID={props.showAssistantCopyPartID}
+                                    turnDurationMs={props.turnDurationMs}
+                                    useV2Actions={props.useV2Actions}
+                                    defaultOpen={partDefaultOpen(
+                                      item()!,
+                                      props.shellToolDefaultOpen,
+                                      props.editToolDefaultOpen,
+                                    )}
+                                  />
+                                </Show>
+                              </Show>
+                            )
+                          }}
+                        </Index>
+                      </Show>
+                    </ToolGroup>
                   </Show>
                 )
               })()}
@@ -825,8 +894,16 @@ export function AssistantParts(props: {
   )
 }
 
-function isContextGroupTool(part: PartType): part is ToolPart {
-  return part.type === "tool" && CONTEXT_GROUP_TOOLS.has(part.tool)
+function toolGroupKind(part: PartType): ToolGroupKind | undefined {
+  if (part.type !== "tool" || part.tool === "question") return
+  if (CONTEXT_GROUP_TOOLS.has(part.tool)) return "context"
+  if (COMMAND_GROUP_TOOLS.has(part.tool)) return "command"
+  if (EDIT_GROUP_TOOLS.has(part.tool)) return "edit"
+  return "tool"
+}
+
+function isToolGroupPart(part: PartType, kind: ToolGroupKind): part is ToolPart {
+  return toolGroupKind(part) === kind
 }
 
 function contextToolDetail(part: ToolPart): string | undefined {
@@ -903,6 +980,49 @@ function contextToolSummary(parts: ToolPart[]) {
   return { read, search, list }
 }
 
+type ToolActionKind = "read" | "search" | "list" | "command" | "edit" | "tool"
+
+function toolActionKind(tool: string): ToolActionKind | undefined {
+  if (tool === "question" || HIDDEN_TOOLS.has(tool)) return
+  if (tool === "read") return "read"
+  if (tool === "glob" || tool === "grep") return "search"
+  if (tool === "list") return "list"
+  if (COMMAND_GROUP_TOOLS.has(tool)) return "command"
+  if (EDIT_GROUP_TOOLS.has(tool)) return "edit"
+  return "tool"
+}
+
+// Cumulative activity of a turn, shown by the thinking preloader so progress is
+// visible while the model works. Context lookups stay in noun form; categories
+// with a part still pending or running switch to their active verb form.
+export function toolActionCountItems(parts: readonly PartType[]): CountItem[] {
+  const tools = parts.filter((part): part is ToolPart => part.type === "tool" && renderable(part))
+  const count = (kind: ToolActionKind) => tools.filter((part) => toolActionKind(part.tool) === kind).length
+  const running = (kind: ToolActionKind) =>
+    tools.some(
+      (part) =>
+        toolActionKind(part.tool) === kind && (part.state.status === "pending" || part.state.status === "running"),
+    )
+
+  return [
+    { key: "ui.messagePart.context.read", count: count("read") },
+    { key: "ui.messagePart.context.search", count: count("search") },
+    { key: "ui.messagePart.context.list", count: count("list") },
+    {
+      key: running("command") ? "ui.messagePart.tools.command.active" : "ui.messagePart.tools.command.done",
+      count: count("command"),
+    },
+    {
+      key: running("edit") ? "ui.messagePart.tools.edit.active" : "ui.messagePart.tools.edit.done",
+      count: count("edit"),
+    },
+    {
+      key: running("tool") ? "ui.messagePart.tools.generic.active" : "ui.messagePart.tools.generic.done",
+      count: count("tool"),
+    },
+  ]
+}
+
 function ExaOutput(props: { output?: string }) {
   const links = createMemo(() => urls(props.output))
 
@@ -944,6 +1064,9 @@ export function Message(props: MessageProps) {
             actions={props.actions}
             useV2Actions={props.useV2Actions}
             comments={props.comments}
+            open={props.userMessageOpen}
+            onOpenChange={props.onUserMessageOpenChange}
+            partIdentity={props.partIdentity}
           />
         )}
       </Match>
@@ -992,15 +1115,25 @@ export function AssistantMessageDisplay(props: {
 
         return (
           <Switch>
-            <Match when={entryType() === "context"}>
+            <Match when={entryType() === "tool"}>
               {(() => {
+                const kind = createMemo(() => {
+                  const entry = entryAccessor()
+                  if (entry.type !== "tool") return "tool" as const
+                  return entry.kind
+                })
+                const refs = createMemo(() => {
+                  const entry = entryAccessor()
+                  if (entry.type !== "tool") return []
+                  return entry.refs
+                })
                 const parts = createMemo(
                   () => {
                     const entry = entryAccessor()
-                    if (entry.type !== "context") return emptyTools
+                    if (entry.type !== "tool") return emptyTools
                     return entry.refs
                       .map((ref) => part().get(ref.partID))
-                      .filter((part): part is ToolPart => !!part && isContextGroupTool(part))
+                      .filter((part): part is ToolPart => !!part && isToolGroupPart(part, entry.kind))
                   },
                   emptyTools,
                   { equals: same },
@@ -1008,7 +1141,25 @@ export function AssistantMessageDisplay(props: {
 
                 return (
                   <Show when={parts().length > 0}>
-                    <ContextToolGroup parts={parts()} />
+                    <ToolGroup parts={parts()} kind={kind()}>
+                      <Show when={kind() !== "context"}>
+                        <Index each={refs()}>
+                          {(refAccessor) => {
+                            const item = createMemo(() => part().get(refAccessor().partID))
+                            return (
+                              <Show when={item()}>
+                                <Part
+                                  part={item()!}
+                                  message={props.message}
+                                  showAssistantCopyPartID={props.showAssistantCopyPartID}
+                                  useV2Actions={props.useV2Actions}
+                                />
+                              </Show>
+                            )
+                          }}
+                        </Index>
+                      </Show>
+                    </ToolGroup>
                   </Show>
                 )
               })()}
@@ -1040,12 +1191,31 @@ export function AssistantMessageDisplay(props: {
   )
 }
 
-export function ContextToolGroup(props: {
+function toolGroupTitle(
+  kind: ToolGroupKind,
+  active: boolean,
+  count: number,
+  i18n: ReturnType<typeof useI18n>,
+) {
+  if (kind === "context")
+    return i18n.t(
+      active ? "ui.sessionTurn.status.gatheringContext" : "ui.sessionTurn.status.gatheredContext",
+    )
+  if (kind === "command")
+    return i18n.plural(active ? "ui.messagePart.tools.command.active" : "ui.messagePart.tools.command.done", count)
+  if (kind === "edit")
+    return i18n.plural(active ? "ui.messagePart.tools.edit.active" : "ui.messagePart.tools.edit.done", count)
+  return i18n.plural(active ? "ui.messagePart.tools.generic.active" : "ui.messagePart.tools.generic.done", count)
+}
+
+export function ToolGroup(props: {
   parts: ToolPart[]
+  kind: ToolGroupKind
   busy?: boolean
   open?: boolean
   onOpenChange?: (open: boolean) => void
   onSizeChange?: () => void
+  children?: JSX.Element
 }) {
   const i18n = useI18n()
   const [localOpen, setLocalOpen] = createSignal(false)
@@ -1054,6 +1224,7 @@ export function ContextToolGroup(props: {
     () =>
       !!props.busy || props.parts.some((part) => part.state.status === "pending" || part.state.status === "running"),
   )
+  const failed = createMemo(() => props.parts.some((part) => part.state.status === "error"))
   const summary = createMemo(() => contextToolSummary(props.parts))
   const handleOpenChange = (value: boolean) => {
     if (props.open === undefined) setLocalOpen(value)
@@ -1067,84 +1238,110 @@ export function ContextToolGroup(props: {
       onOpenChange={handleOpenChange}
       variant="ghost"
       class="tool-collapsible"
+      data-kind={props.kind}
       data-timeline-part-ids={props.parts.map((part) => part.id).join(",")}
     >
       <Collapsible.Trigger>
-        <div data-component="context-tool-group-trigger">
+        <div data-component="tool-group-trigger">
           <span
-            data-slot="context-tool-group-title"
+            data-slot="tool-group-title"
             class="min-w-0 flex items-center gap-2 text-14-medium text-text-strong"
           >
-            <span data-slot="context-tool-group-label" class="shrink-0">
-              <ToolStatusTitle
-                active={pending()}
-                activeText={i18n.t("ui.sessionTurn.status.gatheringContext")}
-                doneText={i18n.t("ui.sessionTurn.status.gatheredContext")}
-                split={false}
-              />
-            </span>
-            <span
-              data-slot="context-tool-group-summary"
-              class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-normal text-text-base"
+            <Show
+              when={props.kind === "context"}
+              fallback={
+                <span data-slot="tool-group-label" class="shrink-0">
+                  {toolGroupTitle(props.kind, pending(), props.parts.length, i18n)}
+                </span>
+              }
             >
-              <AnimatedCountList
-                items={[
-                  {
-                    key: "ui.messagePart.context.read",
-                    count: summary().read,
-                  },
-                  {
-                    key: "ui.messagePart.context.search",
-                    count: summary().search,
-                  },
-                  {
-                    key: "ui.messagePart.context.list",
-                    count: summary().list,
-                  },
-                ]}
-                fallback=""
-              />
-            </span>
+              <span data-slot="tool-group-label" class="shrink-0">
+                <ToolStatusTitle
+                  active={pending()}
+                  activeText={i18n.t("ui.sessionTurn.status.gatheringContext")}
+                  doneText={i18n.t("ui.sessionTurn.status.gatheredContext")}
+                  split={false}
+                />
+              </span>
+              <span
+                data-slot="tool-group-summary"
+                class="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-normal text-text-base"
+              >
+                <AnimatedCountList
+                  items={[
+                    {
+                      key: "ui.messagePart.context.read",
+                      count: summary().read,
+                    },
+                    {
+                      key: "ui.messagePart.context.search",
+                      count: summary().search,
+                    },
+                    {
+                      key: "ui.messagePart.context.list",
+                      count: summary().list,
+                    },
+                  ]}
+                  fallback=""
+                />
+              </span>
+            </Show>
+            <Show when={failed()}>
+              <span data-slot="tool-group-error" class="shrink-0">
+                {i18n.t("ui.toolErrorCard.failed")}
+              </span>
+            </Show>
           </span>
           <Collapsible.Arrow />
         </div>
       </Collapsible.Trigger>
       <Collapsible.Content>
-        <div data-component="context-tool-group-list">
-          <Index each={props.parts}>
-            {(partAccessor) => {
-              const trigger = createMemo(() => contextToolTrigger(partAccessor(), i18n))
-              const running = createMemo(
-                () => partAccessor().state.status === "pending" || partAccessor().state.status === "running",
-              )
-              return (
-                <div data-slot="context-tool-group-item">
-                  <div data-component="tool-trigger">
-                    <div data-slot="basic-tool-tool-trigger-content">
-                      <div data-slot="basic-tool-tool-info">
-                        <div data-slot="basic-tool-tool-info-structured">
-                          <div data-slot="basic-tool-tool-info-main">
-                            <span data-slot="basic-tool-tool-title">
-                              <TextShimmer text={trigger().title} active={running()} />
-                            </span>
-                            <Show when={trigger().subtitle}>
-                              <span data-slot="basic-tool-tool-subtitle">{trigger().subtitle}</span>
-                            </Show>
-                            <Show when={trigger().args?.length}>
-                              <For each={trigger().args}>
-                                {(arg) => <span data-slot="basic-tool-tool-arg">{arg}</span>}
-                              </For>
-                            </Show>
+        <Show
+          when={props.kind === "context"}
+          fallback={<div data-component="tool-group-list">{props.children}</div>}
+        >
+          <div data-component="tool-group-list" data-kind="context">
+            <Index each={props.parts}>
+              {(partAccessor) => {
+                const trigger = createMemo(() => contextToolTrigger(partAccessor(), i18n))
+                const running = createMemo(
+                  () => partAccessor().state.status === "pending" || partAccessor().state.status === "running",
+                )
+                return (
+                  <div data-slot="tool-group-item">
+                    <div data-component="tool-trigger">
+                      <div data-slot="basic-tool-tool-trigger-content">
+                        <div data-slot="basic-tool-tool-info">
+                          <div data-slot="basic-tool-tool-info-structured">
+                            <div data-slot="basic-tool-tool-info-main">
+                              <span data-slot="basic-tool-tool-title">
+                                <TextShimmer text={trigger().title} active={running()} />
+                              </span>
+                              <Show when={trigger().subtitle}>
+                                <bdi dir="ltr" data-slot="basic-tool-tool-subtitle">
+                                  {trigger().subtitle}
+                                </bdi>
+                              </Show>
+                              <Show when={trigger().args?.length}>
+                                <For each={trigger().args}>
+                                  {(arg) => (
+                                    <bdi dir="ltr" data-slot="basic-tool-tool-arg">
+                                      {arg}
+                                    </bdi>
+                                  )}
+                                </For>
+                              </Show>
+                            </div>
                           </div>
                         </div>
                       </div>
                     </div>
                   </div>
-                </div>
-              )
-            }}
-          </Index>
-        </div>
+                )
+              }}
+            </Index>
+          </div>
+        </Show>
       </Collapsible.Content>
     </Collapsible>
   )
@@ -1184,6 +1381,9 @@ export function UserMessageDisplay(props: {
   actions?: UserActions
   useV2Actions?: boolean
   comments?: UserMessageComment[]
+  open?: boolean
+  onOpenChange?: (open: boolean) => void
+  partIdentity?: boolean
 }) {
   const data = useData()
   const dialog = useDialog()
@@ -1200,6 +1400,33 @@ export function UserMessageDisplay(props: {
   )
 
   const text = createMemo(() => textPart()?.text || "")
+
+  const [localOpen, setLocalOpen] = createSignal(false)
+  const open = () => props.open ?? localOpen()
+  const toggleOpen = () => {
+    const next = !open()
+    if (props.open === undefined) setLocalOpen(next)
+    props.onOpenChange?.(next)
+  }
+
+  let textRef: HTMLDivElement | undefined
+  const [textOverflow, setTextOverflow] = createSignal(false)
+  const measureTextOverflow = () => {
+    const element = textRef
+    if (!element) return
+    setTextOverflow(element.scrollHeight - element.clientHeight > 1)
+  }
+  createEffect(() => {
+    text()
+    open()
+    queueMicrotask(measureTextOverflow)
+  })
+  onMount(() => {
+    measureTextOverflow()
+    const observer = new ResizeObserver(measureTextOverflow)
+    if (textRef) observer.observe(textRef)
+    onCleanup(() => observer.disconnect())
+  })
 
   const files = createMemo(() => (props.parts?.filter((p) => p.type === "file") as FilePart[]) ?? [])
 
@@ -1313,7 +1540,10 @@ export function UserMessageDisplay(props: {
   )
 
   return (
-    <div data-component="user-message" data-timeline-part-id={textPart()?.id}>
+    <div
+      data-component="user-message"
+      data-timeline-part-id={props.partIdentity === false ? undefined : textPart()?.id}
+    >
       <Show when={!props.useV2Actions}>{renderAttachments()}</Show>
       <Show
         when={text()}
@@ -1325,8 +1555,10 @@ export function UserMessageDisplay(props: {
       >
         <div data-slot="user-message-body">
           <div
+            ref={textRef}
             data-slot="user-message-text"
             dir="auto"
+            data-expanded={open() ? "true" : undefined}
             data-comments={messageComments().length > 0 ? "true" : undefined}
           >
             <HighlightedText text={text()} references={inlineFiles()} agents={agents()} />
@@ -1334,6 +1566,22 @@ export function UserMessageDisplay(props: {
               <UserMessageComments comments={messageComments()} bounded />
             </Show>
           </div>
+          <Show when={textOverflow() || open()}>
+            <button
+              type="button"
+              data-slot="user-message-expand"
+              aria-expanded={open()}
+              onClick={(event) => {
+                event.stopPropagation()
+                toggleOpen()
+              }}
+            >
+              <span data-slot="user-message-expand-label">
+                {open() ? i18n.t("ui.message.collapse") : i18n.t("ui.message.expand")}
+              </span>
+              <Icon name="chevron-down" size="small" />
+            </button>
+          </Show>
         </div>
       </Show>
       <Show when={props.useV2Actions}>{renderAttachments()}</Show>

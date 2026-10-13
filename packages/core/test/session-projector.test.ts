@@ -564,4 +564,98 @@ describe("SessionProjector", () => {
       ])
     }),
   )
+
+  it.effect("keeps the first durable terminal for an assistant turn", () =>
+    Effect.gen(function* () {
+      const { db } = yield* Database.Service
+      yield* db
+        .insert(ProjectTable)
+        .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(SessionTable)
+        .values({
+          id: sessionID,
+          project_id: Project.ID.global,
+          slug: "test",
+          directory: "/project",
+          title: "test",
+          version: "test",
+        })
+        .run()
+        .pipe(Effect.orDie)
+      const failed = SessionMessage.ID.make("msg_first_terminal_failed")
+      const settled = SessionMessage.ID.make("msg_first_terminal_settled")
+      yield* db
+        .insert(SessionMessageTable)
+        .values([assistantRow(failed, 0), assistantRow(settled, 1)])
+        .run()
+        .pipe(Effect.orDie)
+
+      const service = yield* EventV2.Service
+      yield* service.publish(SessionEvent.Step.Failed, {
+        sessionID,
+        timestamp: DateTime.makeUnsafe(1),
+        assistantMessageID: failed,
+        error: { type: "unknown", message: "Provider unavailable" },
+      })
+      yield* service.publish(SessionEvent.Step.Ended, {
+        sessionID,
+        timestamp: DateTime.makeUnsafe(2),
+        assistantMessageID: failed,
+        finish: "stop",
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      })
+      yield* service.publish(SessionEvent.Step.Ended, {
+        sessionID,
+        timestamp: DateTime.makeUnsafe(3),
+        assistantMessageID: settled,
+        finish: "stop",
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      })
+      yield* service.publish(SessionEvent.Step.Failed, {
+        sessionID,
+        timestamp: DateTime.makeUnsafe(4),
+        assistantMessageID: settled,
+        error: { type: "unknown", message: "Late provider failure" },
+      })
+
+      const rows = yield* db
+        .select()
+        .from(SessionMessageTable)
+        .where(eq(SessionMessageTable.session_id, sessionID))
+        .orderBy(asc(SessionMessageTable.id))
+        .all()
+        .pipe(Effect.orDie)
+      const messages = rows.map((row) =>
+        Schema.decodeUnknownSync(SessionMessage.Message)({ ...row.data, id: row.id, type: row.type }),
+      )
+      expect(messages).toEqual([
+        SessionMessage.Assistant.make({
+          id: failed,
+          type: "assistant",
+          agent: "build",
+          model,
+          content: [],
+          finish: "error",
+          error: { type: "unknown", message: "Provider unavailable" },
+          time: { created, completed: DateTime.makeUnsafe(1) },
+        }),
+        SessionMessage.Assistant.make({
+          id: settled,
+          type: "assistant",
+          agent: "build",
+          model,
+          content: [],
+          finish: "stop",
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          time: { created, completed: DateTime.makeUnsafe(3) },
+        }),
+      ])
+    }),
+  )
 })

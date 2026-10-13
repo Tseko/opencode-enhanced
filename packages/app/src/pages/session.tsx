@@ -43,7 +43,7 @@ import { NewSessionView, SessionHeader } from "@/components/session"
 import { ErrorPage } from "@/pages/error"
 import { CommentsProvider, useComments } from "@/context/comments"
 import { useCommand } from "@/context/command"
-import { DirectoryDataProvider } from "@/pages/directory-layout"
+import { DirectoryDataProvider } from "@/pages/directory-data-provider"
 import { useServerSync } from "@/context/server-sync"
 import { useLanguage } from "@/context/language"
 import { useLayout } from "@/context/layout"
@@ -309,8 +309,9 @@ function MarkSessionNotificationsViewed(props: { sessionID?: () => string | unde
   createEffect(() => {
     const sessionID = props.sessionID?.()
     if (!notification.ready() || !sessionID) return
-    if (notification.session.unseenCount(sessionID) === 0) return
-    notification.session.markViewed(sessionID)
+    // Untracked so a manually-marked-unread session is not instantly cleared
+    // while it is already open; it clears on the next session open.
+    untrack(() => notification.session.markViewed(sessionID))
   })
   return null
 }
@@ -1746,12 +1747,6 @@ export default function Page() {
     return followupMutation.variables?.id
   })
 
-  const queueEnabled = createMemo(() => {
-    const id = params.id
-    if (!id) return false
-    return settings.general.followup() === "queue" && busy(id) && !composer.blocked() && !isChildSession()
-  })
-
   const followupText = (item: FollowupDraft) => {
     const text = item.prompt
       .map((part) => {
@@ -2192,7 +2187,6 @@ export default function Page() {
                       }}
                       edit={editingFollowup()}
                       onEditLoaded={clearFollowupEdit}
-                      shouldQueue={queueEnabled}
                       onQueue={queueFollowup}
                       onAbort={() => {
                         const id = params.id
@@ -2222,7 +2216,6 @@ export default function Page() {
                         return editingFollowup()
                       },
                       onEditLoaded: clearFollowupEdit,
-                      shouldQueue: queueEnabled,
                       onQueue: queueFollowup,
                       onAbort: () => {
                         const id = params.id

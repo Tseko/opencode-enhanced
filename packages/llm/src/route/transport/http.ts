@@ -1,8 +1,9 @@
-import { Effect, Stream } from "effect"
+import { Duration, Effect, Stream } from "effect"
 import { Headers, HttpClientRequest } from "effect/unstable/http"
 import { Auth } from "../auth"
 import { render as renderEndpoint } from "../endpoint"
 import { Framing, type Framing as FramingDef } from "../framing"
+import { resolveTimeouts } from "../timeouts"
 import type { Transport, TransportPrepareInput } from "./index"
 import * as ProviderShared from "../../protocols/shared"
 import { mergeJsonRecords, type LLMRequest } from "../../schema"
@@ -127,26 +128,31 @@ export const httpJson = <Body, Frame>(input: HttpJsonInput<Body, Frame>): HttpJs
         framing: input.framing,
       })),
     ),
-  frames: (prepared, request, runtime) =>
-    Stream.unwrap(
+  frames: (prepared, request, runtime) => {
+    const route = `${request.model.provider}/${request.model.route.id}`
+    const timeouts = resolveTimeouts(request.model.route.defaults.timeouts)
+    return Stream.unwrap(
       runtime.http
         .execute(prepared.request)
         .pipe(
+          // A provider that never sends response headers must not hold the
+          // request open; the body stream has its own semantic idle deadline.
+          Effect.timeoutOrElse({
+            duration: Duration.millis(timeouts.requestMs),
+            orElse: () => ProviderShared.eventError(route, `Provider did not respond within ${timeouts.requestMs}ms`),
+          }),
           Effect.map((response) =>
             prepared.framing.frame(
               response.stream.pipe(
                 Stream.mapError((error) =>
-                  ProviderShared.eventError(
-                    `${request.model.provider}/${request.model.route.id}`,
-                    `Failed to read ${request.model.provider}/${request.model.route.id} stream`,
-                    ProviderShared.errorText(error),
-                  ),
+                  ProviderShared.eventError(route, `Failed to read ${route} stream`, ProviderShared.errorText(error)),
                 ),
               ),
             ),
           ),
         ),
-    ),
+    )
+  },
 })
 
 export const sseJson = {

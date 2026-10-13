@@ -110,6 +110,8 @@ export const dict: Record<string, string> = {
   "command.category.workspace": "कार्यस्थान",
   "command.category.settings": "सेटिङहरू",
   "command.logs.export": "लगहरू निर्यात गर्नुहोस्",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "प्रणाली",
   "theme.scheme.light": "उज्यालो",
   "theme.scheme.dark": "अँध्यारो",

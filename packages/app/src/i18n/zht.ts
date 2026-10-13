@@ -120,6 +120,8 @@ export const dict = {
 
   "command.category.settings": "設定",
   "command.logs.export": "匯出記錄檔",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "系統",
   "theme.scheme.light": "淺色",
   "theme.scheme.dark": "深色",

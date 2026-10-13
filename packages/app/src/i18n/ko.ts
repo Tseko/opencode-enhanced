@@ -16,6 +16,8 @@ export const dict = {
   "command.category.permissions": "권한",
   "command.category.workspace": "작업 공간",
   "command.category.settings": "설정",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "시스템",
   "theme.scheme.light": "라이트",
   "theme.scheme.dark": "다크",

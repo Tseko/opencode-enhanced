@@ -109,6 +109,8 @@ export const dict = {
   "command.category.workspace": "Workspace",
   "command.category.settings": "ቅንጅቶች",
   "command.logs.export": "የመላክ ምዝግብ ማስታወሻዎች",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "ስርዓት",
   "theme.scheme.light": "ብርሃን",
   "theme.scheme.dark": "ጨለማ",

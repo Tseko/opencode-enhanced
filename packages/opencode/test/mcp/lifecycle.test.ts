@@ -14,7 +14,7 @@ import {
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { Cause, Effect, Exit } from "effect"
+import { Cause, Effect, Exit, Logger } from "effect"
 import type { MCP as MCPNS } from "../../src/mcp/index"
 import { MCP } from "../../src/mcp/index"
 import { McpOAuthCallback } from "../../src/mcp/oauth-callback"
@@ -540,6 +540,80 @@ it.instance("remote timeout aborts both real HTTP transport attempts", () =>
       "remote transport requests were not aborted",
     )
     expect(server.requests).toEqual(["POST", "GET"])
+  }),
+)
+
+it.instance("remote transport failures report the first transport diagnosis", () =>
+  Effect.gen(function* () {
+    const server = yield* Effect.acquireRelease(
+      Effect.sync(() => Bun.serve({ port: 0, fetch: () => new Response("unavailable", { status: 503 }) })),
+      (http) => Effect.promise(() => http.stop(true)),
+    )
+    const mcp = yield* MCP.Service
+    yield* mcp.add("diagnosis", remote(server.url.toString(), 500))
+
+    const status = (yield* mcp.status()).diagnosis
+    expect(status?.status).toBe("failed")
+    if (status?.status !== "failed") return
+    // The SSE fallback shares the URL and auth provider, so its error must not mask
+    // the StreamableHTTP diagnosis.
+    expect(status.error).toContain("Streamable HTTP")
+    expect(status.error).not.toContain("SSE")
+  }),
+)
+
+it.instance("logs a diagnostic when a connected server advertises no tools", () =>
+  Effect.gen(function* () {
+    const server = yield* lifecycleServer({ capabilities: { resources: {} } })
+    const mcp = yield* MCP.Service
+    const messages: unknown[] = []
+
+    yield* mcp.add("no-tools", remote(server.url)).pipe(
+      Effect.provide(
+        Logger.layer([
+          Logger.make<unknown, void>((options) => {
+            messages.push(options.message)
+          }),
+        ]),
+      ),
+    )
+
+    expect((yield* mcp.status())["no-tools"]?.status).toBe("connected")
+    expect(messages).toContainEqual([
+      "connected MCP server advertises no tools capability",
+      expect.objectContaining({ key: "no-tools" }),
+    ])
+  }),
+)
+
+it.instance("logs tool discovery failures instead of failing silently", () =>
+  Effect.gen(function* () {
+    const server = yield* lifecycleServer({ capabilities: { tools: {} } })
+    server.state.listToolsError = "listTools failed"
+    const mcp = yield* MCP.Service
+    const messages: unknown[] = []
+
+    yield* mcp.add("broken-listing", remote(server.url)).pipe(
+      Effect.provide(
+        Logger.layer([
+          Logger.make<unknown, void>((options) => {
+            messages.push(options.message)
+          }),
+        ]),
+      ),
+    )
+
+    expect((yield* mcp.status())["broken-listing"]?.status).toBe("failed")
+    expect(messages).toContainEqual([
+      "failed to list MCP tools",
+      expect.objectContaining({ error: expect.stringContaining("listTools failed") }),
+    ])
+    // Failures raised after the transport connects bypass the "server unavailable"
+    // branch that only runs when no client was created.
+    expect(messages).toContainEqual([
+      "server unavailable",
+      expect.objectContaining({ key: "broken-listing", type: "remote", status: "failed" }),
+    ])
   }),
 )
 

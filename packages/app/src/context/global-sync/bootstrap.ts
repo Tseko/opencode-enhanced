@@ -388,10 +388,7 @@ export async function bootstrapDirectory(input: {
         retry(() =>
           input.api.session.active().then(async (active) => {
             const statuses = Object.fromEntries(
-              Object.entries(active).map(([sessionID, status]) => [
-                sessionID,
-                status.type === "running" ? { type: "busy" as const } : status,
-              ]),
+              Object.entries(active).map(([sessionID]) => [sessionID, { type: "busy" } as const]),
             )
             if (!input.session) {
               input.setStore("session_status", statuses)

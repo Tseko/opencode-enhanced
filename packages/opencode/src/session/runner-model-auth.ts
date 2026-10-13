@@ -33,7 +33,8 @@ const layer = Layer.effect(
         const credential = connection
           ? yield* integrations.connection.resolve(connection)
           : yield* apiKeyFromAuth(auth, selected.providerID)
-        return yield* SessionRunnerModel.resolve(session, selected, credential)
+        const model = yield* SessionRunnerModel.resolve(session, selected, credential)
+        return { model, info: selected }
       }),
     })
   }),

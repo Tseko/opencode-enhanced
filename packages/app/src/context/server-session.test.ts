@@ -213,6 +213,196 @@ describe("server session", () => {
     expect(ctx.store.data.part.msg_2_assistant).toMatchObject([{ type: "text", text: "world" }])
   })
 
+  test("appends live V2 text deltas in place after the part exists", () => {
+    const ctx = setup({ child: session("child") })
+    ctx.store.remember(session("child"))
+    ctx.store.set("session_message", "child", [
+      {
+        id: "msg_1_user",
+        type: "user",
+        text: "hello",
+        time: { created: 1 },
+      },
+    ])
+    const apply = (input: object) => ctx.store.applyV2(input as OpenCodeEvent)
+
+    apply({
+      id: "evt_step",
+      created: 2,
+      type: "session.next.step.started",
+      location: { directory: "/repo" },
+      data: {
+        sessionID: "child",
+        assistantMessageID: "msg_2_assistant",
+        agent: "build",
+        model: { id: "model", providerID: "provider" },
+      },
+    })
+    apply({
+      id: "evt_text_start",
+      created: 3,
+      type: "session.next.text.started",
+      location: { directory: "/repo" },
+      data: { sessionID: "child", assistantMessageID: "msg_2_assistant", textID: "txt_1" },
+    })
+    apply({
+      id: "evt_text_delta_1",
+      created: 4,
+      type: "session.next.text.delta",
+      location: { directory: "/repo" },
+      data: { sessionID: "child", assistantMessageID: "msg_2_assistant", textID: "txt_1", delta: "hel" },
+    })
+    apply({
+      id: "evt_text_delta_2",
+      created: 5,
+      type: "session.next.text.delta.2",
+      location: { directory: "/repo" },
+      data: { sessionID: "child", assistantMessageID: "msg_2_assistant", textID: "txt_1", delta: "lo" },
+    })
+
+    const textID = "msg_2_assistant:text:0"
+    expect(ctx.store.data.session_message.child?.at(-1)).toMatchObject({
+      id: "msg_2_assistant",
+      content: [{ type: "text", text: "hello" }],
+    })
+    expect(ctx.store.data.part.msg_2_assistant).toMatchObject([{ id: textID, type: "text", text: "hello" }])
+    expect(ctx.store.data.part_text_accum_delta[textID]).toBe("hello")
+
+    apply({
+      id: "evt_text_end",
+      created: 6,
+      type: "session.next.text.ended",
+      location: { directory: "/repo" },
+      data: { sessionID: "child", assistantMessageID: "msg_2_assistant", textID: "txt_1", text: "hello!" },
+    })
+
+    expect(ctx.store.data.part.msg_2_assistant).toMatchObject([{ id: textID, type: "text", text: "hello!" }])
+    expect(ctx.store.data.part_text_accum_delta[textID]).toBeUndefined()
+  })
+
+  test("appends live V2 reasoning deltas in place after the part exists", () => {
+    const ctx = setup({ child: session("child") })
+    ctx.store.remember(session("child"))
+    ctx.store.set("session_message", "child", [
+      {
+        id: "msg_1_user",
+        type: "user",
+        text: "hello",
+        time: { created: 1 },
+      },
+    ])
+    const apply = (input: object) => ctx.store.applyV2(input as OpenCodeEvent)
+
+    apply({
+      id: "evt_step",
+      created: 2,
+      type: "session.next.step.started",
+      location: { directory: "/repo" },
+      data: {
+        sessionID: "child",
+        assistantMessageID: "msg_2_assistant",
+        agent: "build",
+        model: { id: "model", providerID: "provider" },
+      },
+    })
+    apply({
+      id: "evt_reason_start",
+      created: 3,
+      type: "session.next.reasoning.started",
+      location: { directory: "/repo" },
+      data: { sessionID: "child", assistantMessageID: "msg_2_assistant", reasoningID: "rsn_1" },
+    })
+    apply({
+      id: "evt_reason_delta_1",
+      created: 4,
+      type: "session.next.reasoning.delta",
+      location: { directory: "/repo" },
+      data: { sessionID: "child", assistantMessageID: "msg_2_assistant", reasoningID: "rsn_1", delta: "think" },
+    })
+    apply({
+      id: "evt_reason_delta_2",
+      created: 5,
+      type: "session.next.reasoning.delta.1",
+      location: { directory: "/repo" },
+      data: { sessionID: "child", assistantMessageID: "msg_2_assistant", reasoningID: "rsn_1", delta: "ing" },
+    })
+
+    const reasoningID = "msg_2_assistant:reasoning:0"
+    expect(ctx.store.data.session_message.child?.at(-1)).toMatchObject({
+      id: "msg_2_assistant",
+      content: [{ type: "reasoning", text: "thinking" }],
+    })
+    expect(ctx.store.data.part.msg_2_assistant).toMatchObject([{ id: reasoningID, type: "reasoning", text: "thinking" }])
+    expect(ctx.store.data.part_text_accum_delta[reasoningID]).toBe("thinking")
+  })
+
+  test("keeps sibling tool parts when later text deltas apply in place", () => {
+    const ctx = setup({ child: session("child") })
+    ctx.store.remember(session("child"))
+    ctx.store.set("session_message", "child", [
+      {
+        id: "msg_1_user",
+        type: "user",
+        text: "hello",
+        time: { created: 1 },
+      },
+    ])
+    const apply = (input: object) => ctx.store.applyV2(input as OpenCodeEvent)
+
+    apply({
+      id: "evt_step",
+      created: 2,
+      type: "session.next.step.started",
+      location: { directory: "/repo" },
+      data: {
+        sessionID: "child",
+        assistantMessageID: "msg_2_assistant",
+        agent: "build",
+        model: { id: "model", providerID: "provider" },
+      },
+    })
+    apply({
+      id: "evt_tool_start",
+      created: 3,
+      type: "session.next.tool.input.started",
+      location: { directory: "/repo" },
+      data: {
+        sessionID: "child",
+        assistantMessageID: "msg_2_assistant",
+        callID: "call_1",
+        name: "bash",
+      },
+    })
+    apply({
+      id: "evt_text_start",
+      created: 4,
+      type: "session.next.text.started",
+      location: { directory: "/repo" },
+      data: { sessionID: "child", assistantMessageID: "msg_2_assistant", textID: "txt_1" },
+    })
+    apply({
+      id: "evt_text_delta_1",
+      created: 5,
+      type: "session.next.text.delta",
+      location: { directory: "/repo" },
+      data: { sessionID: "child", assistantMessageID: "msg_2_assistant", textID: "txt_1", delta: "ab" },
+    })
+    apply({
+      id: "evt_text_delta_2",
+      created: 6,
+      type: "session.next.text.delta",
+      location: { directory: "/repo" },
+      data: { sessionID: "child", assistantMessageID: "msg_2_assistant", textID: "txt_1", delta: "c" },
+    })
+
+    const textID = "msg_2_assistant:text:0"
+    expect(ctx.store.data.part.msg_2_assistant).toMatchObject([
+      { type: "tool", callID: "call_1" },
+      { id: textID, type: "text", text: "abc" },
+    ])
+    expect(ctx.store.data.part_text_accum_delta[textID]).toBe("abc")
+  })
+
   test("resolves lineage by session ID without directory", async () => {
     const ctx = setup({ child: session("child", "root"), root: session("root") })
 
@@ -388,7 +578,10 @@ describe("server session", () => {
         throw new Error("current message endpoint called")
       },
     } as unknown as MessageApi
-    const store = createServerSession(client, {} as SessionApi, messageApi, {
+    const sessionApi = {
+      get: async () => session("root"),
+    } as unknown as SessionApi
+    const store = createServerSession(client, sessionApi, messageApi, {
       protocol: Promise.resolve("v1"),
     })
     store.remember(session("root"))
@@ -405,7 +598,7 @@ describe("server session", () => {
         delivery: "steer",
         prompt: { text: "hello" },
       },
-    } as OpenCodeEvent)
+    } as unknown as OpenCodeEvent)
     store.applyV2({
       id: "evt_step",
       created: 2,
@@ -416,7 +609,7 @@ describe("server session", () => {
         agent: "build",
         model: { id: "model", providerID: "provider" },
       },
-    } as OpenCodeEvent)
+    } as unknown as OpenCodeEvent)
 
     expect(store.data.message.root?.map((message) => message.id)).toEqual(["msg_user", "msg_assistant"])
 

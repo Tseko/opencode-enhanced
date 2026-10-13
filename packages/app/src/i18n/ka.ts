@@ -109,6 +109,8 @@ export const dict = {
   "command.category.workspace": "სამუშაო სივრცე",
   "command.category.settings": "პარამეტრები",
   "command.logs.export": "ექსპორტის ჟურნალები",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "სისტემა",
   "theme.scheme.light": "ღია",
   "theme.scheme.dark": "მუქი",

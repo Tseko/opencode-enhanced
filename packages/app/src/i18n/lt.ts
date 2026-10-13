@@ -113,6 +113,8 @@ export const dict = {
   "command.category.workspace": "Darbo sritis",
   "command.category.settings": "Nustatymai",
   "command.logs.export": "Eksportuoti žurnalus",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "Sistema",
   "theme.scheme.light": "Šviesi",
   "theme.scheme.dark": "Tamsi",

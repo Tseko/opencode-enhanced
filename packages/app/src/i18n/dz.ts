@@ -112,6 +112,8 @@ export const dict: Record<string, string> = {
   "command.category.workspace": "ལཱ་གི་ས་སྒོ།",
   "command.category.settings": "སྒྲིག་སྟངས་ཚུ།",
   "command.logs.export": "ཕྱིར་འདྲེན་དྲན་དེབ་ཚུ།",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "ལམ༌ལུགས",
   "theme.scheme.light": "ཡང་འཕྲོས་འཕྲོས",
   "theme.scheme.dark": "གནག་དུང་དུ",

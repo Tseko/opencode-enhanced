@@ -25,6 +25,7 @@ const USER_AGENT = `opencode/${InstallationChannel}/${InstallationVersion}/${Fla
 const CostTier = Schema.Struct({
   input: Schema.Finite,
   output: Schema.Finite,
+  reasoning: Schema.optional(Schema.Finite),
   cache_read: Schema.optional(Schema.Finite),
   cache_write: Schema.optional(Schema.Finite),
   tier: Schema.Struct({
@@ -36,6 +37,7 @@ const CostTier = Schema.Struct({
 const Cost = Schema.Struct({
   input: Schema.Finite,
   output: Schema.Finite,
+  reasoning: Schema.optional(Schema.Finite),
   cache_read: Schema.optional(Schema.Finite),
   cache_write: Schema.optional(Schema.Finite),
   tiers: Schema.optional(Schema.Array(CostTier)),

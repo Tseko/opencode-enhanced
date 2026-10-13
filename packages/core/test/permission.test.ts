@@ -1,6 +1,8 @@
-import { describe, expect } from "bun:test"
-import { Cause, Deferred, Effect, Fiber, Layer } from "effect"
+import { describe, expect, test } from "bun:test"
+import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer, Option, Schema } from "effect"
+import { adjust } from "effect/testing/TestClock"
 import { AgentV2 } from "@opencode-ai/core/agent"
+import { ConfigAgent } from "@opencode-ai/core/config/agent"
 import { Database } from "@opencode-ai/core/database/database"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -99,6 +101,22 @@ function waitForRequest() {
     const fiber = yield* service.assert(assertion()).pipe(Effect.forkScoped)
     const request = yield* Deferred.await(asked)
     return { service, fiber, request }
+  })
+}
+
+function recordReplies() {
+  return Effect.gen(function* () {
+    const events = yield* EventV2.Service
+    const replies: Array<unknown> = []
+    const unsubscribe = yield* events.listen((event) =>
+      event.type === PermissionV2.Event.Replied.type
+        ? Effect.sync(() => {
+            replies.push(event.data)
+          })
+        : Effect.void,
+    )
+    yield* Effect.addFinalizer(() => unsubscribe)
+    return replies
   })
 }
 
@@ -283,6 +301,25 @@ describe("PermissionV2", () => {
     }),
   )
 
+  it.effect("rejects every pending prompt for a session on interrupt", () =>
+    Effect.gen(function* () {
+      yield* setup()
+      const { service, fiber, request } = yield* waitForRequest()
+      yield* service.interrupt(request.sessionID)
+      const exit = yield* Fiber.await(fiber)
+
+      expect(exit._tag).toBe("Failure")
+      if (exit._tag === "Failure")
+        expect(
+          exit.cause.reasons.some(
+            (reason) => Cause.isDieReason(reason) && reason.defect instanceof PermissionV2.DeclinedError,
+          ),
+        ).toBe(true)
+      expect(yield* service.list()).toEqual([])
+      expect(yield* service.get(request.id)).toBeUndefined()
+    }),
+  )
+
   it.effect("stores and removes saved resources for a project", () =>
     Effect.gen(function* () {
       yield* setup()
@@ -310,6 +347,102 @@ describe("PermissionV2", () => {
       yield* service.assert(assertion({ id: PermissionV2.ID.create("per_next"), resources: ["src/next.ts"] }))
       yield* saved.remove(id)
       expect(yield* saved.list()).toEqual([])
+    }),
+  )
+
+  test("rejects a malformed permission config instead of degrading it", () => {
+    // §10.1 fail-closed: an invalid effect value or a non-array ruleset does not decode into
+    // a permissive rule. The agent config is dropped instead, and a dropped agent grants
+    // nothing (the permission service falls back to deny-*).
+    const decodeRuleset = Schema.decodeUnknownOption(PermissionV2.Ruleset)
+    expect(Option.isNone(decodeRuleset([{ action: "read", resource: "*", effect: "always" }]))).toBe(true)
+    expect(Option.isNone(decodeRuleset({ action: "read", resource: "*", effect: "allow" }))).toBe(true)
+    expect(Option.isNone(decodeRuleset([{ action: "read", effect: "allow" }]))).toBe(true)
+    const decodeAgent = Schema.decodeUnknownOption(ConfigAgent.Info)
+    expect(Option.isNone(decodeAgent({ permissions: [{ action: "read", resource: "*", effect: "always" }] }))).toBe(
+      true,
+    )
+  })
+
+  it.effect("blocks execution when the configured agent cannot be resolved", () =>
+    Effect.gen(function* () {
+      // §10.1 fail-closed: a malformed agent config is dropped at decode, so the session's
+      // agent resolves to nothing. An unresolvable agent denies the action instead of falling
+      // back to a default permissive ruleset.
+      yield* setup()
+      const agents = yield* AgentV2.Service
+      yield* agents.transform((editor) => editor.remove(AgentV2.ID.make("test")))
+
+      const service = yield* PermissionV2.Service
+      const blocked = yield* service.assert(assertion()).pipe(Effect.flip)
+      expect(blocked).toBeInstanceOf(PermissionV2.BlockedError)
+      if (blocked instanceof PermissionV2.BlockedError)
+        expect(blocked.rules).toEqual([{ action: "*", resource: "*", effect: "deny" }])
+      expect(yield* service.list()).toEqual([])
+    }),
+  )
+
+  it.effect("consumes an approval once and refuses a repeated reply", () =>
+    Effect.gen(function* () {
+      yield* setup()
+      const replies = yield* recordReplies()
+      const { service, fiber, request } = yield* waitForRequest()
+      yield* service.reply({ requestID: request.id, reply: "once" })
+      yield* Fiber.join(fiber)
+
+      const missing = yield* service.reply({ requestID: request.id, reply: "once" }).pipe(Effect.flip)
+      expect(missing).toBeInstanceOf(PermissionV2.NotFoundError)
+      expect(yield* service.list()).toEqual([])
+      expect(replies).toEqual([{ sessionID: request.sessionID, requestID: request.id, reply: "once" }])
+    }),
+  )
+
+  it.effect("coalesces concurrent replies into a single Replied event", () =>
+    Effect.gen(function* () {
+      yield* setup()
+      const replies = yield* recordReplies()
+      const { service, request } = yield* waitForRequest()
+
+      // §10.3: the request ID is the single-use approval token. Two callers racing on the
+      // same approval must not both apply it or publish two durable replies.
+      const results = yield* Effect.all(
+        [
+          service.reply({ requestID: request.id, reply: "once" }).pipe(Effect.exit),
+          service.reply({ requestID: request.id, reply: "once" }).pipe(Effect.exit),
+        ],
+        { concurrency: "unbounded" },
+      )
+      expect(results.filter(Exit.isSuccess)).toHaveLength(1)
+      expect(results.filter((result) => !Exit.isSuccess(result))).toHaveLength(1)
+      expect(replies).toEqual([{ sessionID: request.sessionID, requestID: request.id, reply: "once" }])
+    }),
+  )
+
+  it.effect("rejects an approval that outlives its window", () =>
+    Effect.gen(function* () {
+      yield* setup()
+      const replies = yield* recordReplies()
+      const { service, fiber, request } = yield* waitForRequest()
+
+      yield* adjust(Duration.millis(PermissionV2.APPROVAL_TTL_MS + 60_000))
+      yield* Effect.yieldNow
+
+      // §10.3: an expired prompt is never reported as applicable and never applied.
+      expect(yield* service.list()).toEqual([])
+      expect(yield* service.get(request.id)).toBeUndefined()
+      const missing = yield* service.reply({ requestID: request.id, reply: "once" }).pipe(Effect.flip)
+      expect(missing).toBeInstanceOf(PermissionV2.NotFoundError)
+
+      // The waiting tool is released with a decline instead of being parked forever.
+      const exit = yield* Fiber.await(fiber)
+      expect(exit._tag).toBe("Failure")
+      if (exit._tag === "Failure")
+        expect(
+          exit.cause.reasons.some(
+            (reason) => Cause.isDieReason(reason) && reason.defect instanceof PermissionV2.DeclinedError,
+          ),
+        ).toBe(true)
+      expect(replies).toEqual([{ sessionID: request.sessionID, requestID: request.id, reply: "reject" }])
     }),
   )
 })

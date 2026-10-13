@@ -118,6 +118,8 @@ export const dict = {
   "command.category.settings": "Pengaturan",
   "command.logs.export": "Ekspor log",
 
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "Sistem",
   "theme.scheme.light": "Terang",
   "theme.scheme.dark": "Gelap",

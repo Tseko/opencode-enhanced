@@ -1,4 +1,4 @@
-import { For, Show, createEffect, createMemo, startTransition } from "solid-js"
+import { For, Show, createEffect, createMemo, startTransition, type Accessor } from "solid-js"
 import { createStore, produce } from "solid-js/store"
 import { useParams } from "@solidjs/router"
 import { Binary } from "@opencode-ai/core/util/binary"
@@ -7,9 +7,11 @@ import { IconButtonV2 } from "@opencode-ai/ui/v2/icon-button-v2"
 import { ProjectAvatar } from "@opencode-ai/ui/v2/project-avatar-v2"
 import { TooltipV2 } from "@opencode-ai/ui/v2/tooltip-v2"
 import { MenuV2 } from "@opencode-ai/ui/v2/menu-v2"
+import { LoaderV2 } from "@opencode-ai/ui/v2/loader-v2"
 import { useCommand } from "@/context/command"
 import { getProjectAvatarVariant, type LocalProject, useLayout } from "@/context/layout"
 import { useLanguage } from "@/context/language"
+import { useNotification } from "@/context/notification"
 import { usePlatform } from "@/context/platform"
 import { ServerConnection } from "@/context/server"
 import { useTabs } from "@/context/tabs"
@@ -23,6 +25,7 @@ import { pathKey } from "@/utils/path-key"
 import { sessionTitle } from "@/utils/session-title"
 import { getRelativeTime } from "@/utils/time"
 import { showToast } from "@/utils/toast"
+import { SessionRename } from "./sidebar-items"
 import type { Session } from "@opencode-ai/sdk/v2/client"
 
 export function NewLayoutSidebarCommands() {
@@ -122,6 +125,22 @@ export function NewLayoutSidebar() {
     })
   }
 
+  const renameSession = async (session: Session, title: string) => {
+    const ctx = home.server.focusedContext()
+    if (!ctx) return
+    const original = session.title
+    ctx.sync.session.remember({ ...session, title })
+    try {
+      await ctx.sdk.api.session.rename({ sessionID: session.id, title })
+    } catch (error) {
+      ctx.sync.session.remember({ ...session, title: original })
+      showToast({
+        title: language.t("common.requestFailed"),
+        description: error instanceof Error ? error.message : undefined,
+      })
+    }
+  }
+
   return (
     <nav
       aria-label={language.t("sidebar.nav.projectsAndSessions")}
@@ -195,6 +214,7 @@ export function NewLayoutSidebar() {
                 }}
                 onOpenSession={openSession}
                 onArchiveSession={archiveSession}
+                onRenameSession={renameSession}
                 language={language}
               />
             )}
@@ -217,6 +237,7 @@ function SidebarProject(props: {
   onSelect: () => void
   onOpenSession: (session: Session) => void
   onArchiveSession: (session: Session) => Promise<void>
+  onRenameSession: (session: Session, title: string) => Promise<void>
   language: ReturnType<typeof useLanguage>
 }) {
   const sessions = createMemo(() => {
@@ -229,7 +250,7 @@ function SidebarProject(props: {
       <div class="group/project relative flex h-7 min-w-0 items-center rounded-[6px]">
         <button
           type="button"
-          class="flex h-7 min-w-0 w-full items-center gap-1 rounded-[6px] px-1 text-left text-v2-text-text-muted hover:bg-v2-background-bg-layer-01 hover:text-v2-text-text-base"
+          class="flex h-7 min-w-0 w-full items-center gap-1 rounded-[6px] px-1 text-start text-v2-text-text-muted hover:bg-v2-background-bg-layer-01 hover:text-v2-text-text-base"
           classList={{
             "bg-v2-background-bg-layer-03 text-v2-text-text-base": props.selected,
           }}
@@ -254,7 +275,7 @@ function SidebarProject(props: {
         </button>
         <Show when={props.conn}>
           {(conn) => (
-            <div class="pointer-events-none absolute right-1 top-1/2 flex -translate-y-1/2 opacity-0 group-hover/project:pointer-events-auto group-hover/project:opacity-100">
+            <div class="pointer-events-none absolute end-1 top-1/2 flex -translate-y-1/2 opacity-0 group-hover/project:pointer-events-auto group-hover/project:opacity-100">
               <TooltipV2 placement="top" value={props.language.t("command.session.new")}>
                 <IconButtonV2
                   variant="ghost-muted"
@@ -295,8 +316,12 @@ function SidebarProject(props: {
                 session={session}
                 selected={props.activeSessionID === session.id}
                 language={props.language}
+                working={() =>
+                  props.home.server.focusedSync().session.data.session_working(session.id)
+                }
                 onOpen={() => props.onOpenSession(session)}
                 onArchive={() => void props.onArchiveSession(session)}
+                onRename={(title) => props.onRenameSession(session, title)}
               />
             )}
           </For>
@@ -306,42 +331,141 @@ function SidebarProject(props: {
   )
 }
 
+function SessionMenuItems(props: {
+  unread: Accessor<boolean>
+  language: ReturnType<typeof useLanguage>
+  onMarkRead: () => void
+  onMarkUnread: () => void
+  onArchive?: () => void
+}) {
+  return (
+    <>
+      <Show
+        when={props.unread()}
+        fallback={
+          <MenuV2.Item data-action="sidebar-session-mark-unread" onSelect={props.onMarkUnread}>
+            {props.language.t("sidebar.session.markAsUnread")}
+          </MenuV2.Item>
+        }
+      >
+        <MenuV2.Item data-action="sidebar-session-mark-read" onSelect={props.onMarkRead}>
+          {props.language.t("sidebar.session.markAsRead")}
+        </MenuV2.Item>
+      </Show>
+      <Show when={props.onArchive}>
+        {(onArchive) => (
+          <>
+            <MenuV2.Separator />
+            <MenuV2.Item data-action="sidebar-session-archive-menu" onSelect={onArchive}>
+              {props.language.t("common.archive")}
+            </MenuV2.Item>
+          </>
+        )}
+      </Show>
+    </>
+  )
+}
+
 function SidebarSessionRow(props: {
   session: Session
   selected: boolean
   language: ReturnType<typeof useLanguage>
+  working: Accessor<boolean>
   onOpen: () => void
   onArchive: () => void
+  onRename: (title: string) => Promise<void>
 }) {
+  const notification = useNotification()
+  const unseen = createMemo(() => notification.session.unseenCount(props.session.id) > 0)
+  const markRead = () => notification.session.markViewed(props.session.id)
+  const markUnread = () => notification.session.markUnread(props.session.id, props.session.directory)
+
   return (
-    <div
-      data-session-id={props.session.id}
-      class="group/session relative flex h-7 min-w-0 w-full items-center gap-1 rounded-[6px] px-1.5 text-v2-text-text-muted hover:bg-v2-background-bg-layer-01 hover:text-v2-text-text-base"
-      classList={{
-        "bg-v2-background-bg-layer-03 text-v2-text-text-base": props.selected,
-      }}
-    >
-      <button type="button" class="flex h-7 min-w-0 flex-1 items-center text-left" onClick={props.onOpen}>
-        <span class="min-w-0 truncate text-[13px] [font-weight:440]">{sessionTitle(props.session.title)}</span>
-      </button>
-      <TooltipV2 placement="top" value={props.language.t("common.archive")}>
-        <IconButtonV2
-          data-action="sidebar-session-archive"
-          variant="ghost-muted"
-          size="small"
-          icon={<IconV2 name="archive" />}
-          aria-label={props.language.t("common.archive")}
-          class="hover-reveal shrink-0 group-hover/session:opacity-100 focus-within:opacity-100"
-          onClick={(event) => {
-            event.preventDefault()
-            event.stopPropagation()
-            props.onArchive()
+    <MenuV2.Context>
+      <MenuV2.Context.Trigger
+        as="div"
+        data-session-id={props.session.id}
+        class="group/session relative flex h-7 min-w-0 w-full items-center gap-1 rounded-[6px] px-1.5 text-v2-text-text-muted hover:bg-v2-background-bg-layer-01 hover:text-v2-text-text-base"
+        classList={{
+          "bg-v2-background-bg-layer-03 text-v2-text-text-base": props.selected,
+        }}
+      >
+        <Show when={props.working()}>
+          <div class="session-working-pulse-v2 absolute inset-0 rounded-[6px] pointer-events-none" />
+        </Show>
+        <Show when={props.working() || unseen()}>
+          <span class="flex size-4 shrink-0 items-center justify-center">
+            <Show when={props.working()} fallback={<span class="size-1.5 rounded-full bg-v2-icon-icon-accent" />}>
+              <LoaderV2 width={12} height={12} />
+            </Show>
+          </span>
+        </Show>
+        <button
+          type="button"
+          class="flex h-7 min-w-0 flex-1 items-center text-start"
+          onClick={() => {
+            markRead()
+            props.onOpen()
           }}
-        />
-      </TooltipV2>
-      <span class="shrink-0 text-[11px] tabular-nums text-v2-text-text-muted">
-        {getRelativeTime(props.session.time.updated ?? props.session.time.created, props.language.t)}
-      </span>
-    </div>
+        >
+          <SessionRename
+            value={() => props.session.title ?? ""}
+            displayValue={() => sessionTitle(props.session.title)}
+            onSave={props.onRename}
+            class="min-w-0 truncate text-[13px] [font-weight:440]"
+          />
+        </button>
+        <MenuV2 gutter={6} modal={false} placement="bottom-end">
+          <MenuV2.Trigger
+            as={IconButtonV2}
+            variant="ghost-muted"
+            size="small"
+            icon={<IconV2 name="outline-dots" />}
+            aria-label={props.language.t("common.moreOptions")}
+            data-action="sidebar-session-menu"
+            class="hover-reveal shrink-0 group-hover/session:opacity-100 focus-within:opacity-100"
+          />
+          <MenuV2.Portal>
+            <MenuV2.Content>
+              <SessionMenuItems
+                unread={unseen}
+                language={props.language}
+                onMarkRead={markRead}
+                onMarkUnread={markUnread}
+              />
+            </MenuV2.Content>
+          </MenuV2.Portal>
+        </MenuV2>
+        <TooltipV2 placement="top" value={props.language.t("common.archive")}>
+          <IconButtonV2
+            data-action="sidebar-session-archive"
+            variant="ghost-muted"
+            size="small"
+            icon={<IconV2 name="archive" />}
+            aria-label={props.language.t("common.archive")}
+            class="hover-reveal shrink-0 group-hover/session:opacity-100 focus-within:opacity-100"
+            onClick={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+              props.onArchive()
+            }}
+          />
+        </TooltipV2>
+        <span class="shrink-0 text-[11px] tabular-nums text-v2-text-text-muted">
+          {getRelativeTime(props.session.time.updated ?? props.session.time.created, props.language.t)}
+        </span>
+      </MenuV2.Context.Trigger>
+      <MenuV2.Context.Portal>
+        <MenuV2.Context.Content>
+          <SessionMenuItems
+            unread={unseen}
+            language={props.language}
+            onMarkRead={markRead}
+            onMarkUnread={markUnread}
+            onArchive={props.onArchive}
+          />
+        </MenuV2.Context.Content>
+      </MenuV2.Context.Portal>
+    </MenuV2.Context>
   )
 }

@@ -250,13 +250,13 @@ async function commandV2(input: CompatibleInput, value: SessionCommandInput): Pr
     id: value.id,
     text: expandCommandTemplate(cmd.template, value.arguments ?? ""),
     files: value.files,
-    agent: cmd.agent ?? value.agent,
+    agent: cmd.agent ?? value.agent ?? undefined,
     model: cmd.model
       ? { providerID: cmd.model.providerID, modelID: cmd.model.id }
       : value.model
         ? { providerID: value.model.providerID, modelID: value.model.id }
         : undefined,
-    variant: value.model?.variant ?? cmd.model?.variant,
+    variant: value.model?.variant ?? cmd.model?.variant ?? undefined,
     delivery: value.delivery,
   })
 }

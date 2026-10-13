@@ -5,15 +5,21 @@ import { EventV2 } from "../event"
 import { ModelsDev } from "../models-dev"
 import { ProviderV2 } from "../provider"
 
+// The SDK `ModelCost` does not yet expose the models.dev `reasoning` rate, so the
+// normalized catalog cost keeps it through this local structural refinement.
+type CostList = (ModelV2Info["cost"][number] & { readonly reasoning?: number })[]
+
 function released(date: string) {
   const time = Date.parse(date)
   return Number.isFinite(time) ? time : 0
 }
 
-function cost(input: ModelsDev.Model["cost"]): ModelV2Info["cost"] {
+function cost(input: ModelsDev.Model["cost"]): CostList {
+  const reasoning = input?.reasoning !== undefined ? { reasoning: input.reasoning } : {}
   const base = {
     input: input?.input ?? 0,
     output: input?.output ?? 0,
+    ...reasoning,
     cache: {
       read: input?.cache_read ?? 0,
       write: input?.cache_write ?? 0,
@@ -25,6 +31,7 @@ function cost(input: ModelsDev.Model["cost"]): ModelV2Info["cost"] {
       tier: item.tier,
       input: item.input,
       output: item.output,
+      ...(item.reasoning !== undefined ? { reasoning: item.reasoning } : {}),
       cache: {
         read: item.cache_read ?? 0,
         write: item.cache_write ?? 0,
@@ -49,13 +56,13 @@ function cost(input: ModelsDev.Model["cost"]): ModelV2Info["cost"] {
   ]
 }
 
-function mergeCost(base: ModelV2Info["cost"], override: ModelsDev.Model["cost"] | undefined) {
+function mergeCost(base: CostList, override: ModelsDev.Model["cost"] | undefined) {
   if (!override) return base
   const next = cost(override)
   const [baseDefault, ...baseTiers] = base
   const [nextDefault, ...nextTiers] = next
-  const tierKey = (item: ModelV2Info["cost"][number]) => `${item.tier?.type ?? "base"}:${item.tier?.size ?? 0}`
-  const merge = (left: ModelV2Info["cost"][number], right: ModelV2Info["cost"][number]) => ({
+  const tierKey = (item: CostList[number]) => `${item.tier?.type ?? "base"}:${item.tier?.size ?? 0}`
+  const merge = (left: CostList[number], right: CostList[number]) => ({
     ...left,
     ...right,
     tier: right.tier ?? left.tier,
@@ -78,7 +85,7 @@ function applyModel(
   model: ModelsDev.Model,
   input: {
     readonly name?: string
-    readonly cost?: ModelV2Info["cost"]
+    readonly cost?: CostList
     readonly request?: NonNullable<NonNullable<ModelsDev.Model["experimental"]>["modes"]>[string]["provider"]
   } = {},
 ) {

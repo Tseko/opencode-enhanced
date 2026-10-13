@@ -1,5 +1,5 @@
 import { createStore, reconcile } from "solid-js/store"
-import { type Accessor, batch, createEffect, createMemo, createRoot, getOwner, onCleanup } from "solid-js"
+import { batch, createEffect, createMemo, createRoot, getOwner, onCleanup } from "solid-js"
 import { useNavigate, useParams, useSearchParams } from "@solidjs/router"
 import { createSimpleContext } from "@opencode-ai/ui/context"
 import type { ServerSDK } from "./server-sdk"
@@ -8,7 +8,6 @@ import { usePlatform } from "@/context/platform"
 import { useLanguage } from "@/context/language"
 import { useSettings } from "@/context/settings"
 import { base64Encode } from "@opencode-ai/core/util/encode"
-import { decode64 } from "@/utils/base64"
 import { EventSessionError } from "@opencode-ai/sdk/v2"
 import { Persist, persisted } from "@/utils/persist"
 import { playSoundById } from "@/utils/sound"
@@ -113,7 +112,7 @@ export const { use: useNotification, provider: NotificationProvider } = createSi
   name: "Notification",
   gate: false,
   init: () => {
-    const params = useParams<{ serverKey?: string; dir?: string; id?: string }>()
+    const params = useParams<{ serverKey?: string }>()
     const [search] = useSearchParams<{ draftId?: string }>()
     const global = useGlobal()
     const server = useServer()
@@ -133,9 +132,6 @@ export const { use: useNotification, provider: NotificationProvider } = createSi
       }
       return server.key
     })
-    const activeDirectory = createMemo(() => decode64(params.dir))
-    const activeSession = createMemo(() => params.id)
-
     const ensure = (key: ServerConnection.Key) => {
       const conn = global.servers.list().find((item) => ServerConnection.key(item) === key)
       if (!conn) throw new Error(`Notification server not found: ${key}`)
@@ -148,9 +144,6 @@ export const { use: useNotification, provider: NotificationProvider } = createSi
           state: createServerNotificationState({
             sdk: ctx.sdk,
             sync: ctx.sync,
-            active: () => server.scope(activeServer()) === ctx.sdk.scope,
-            directory: activeDirectory,
-            sessionID: activeSession,
             platform,
             settings,
             language,
@@ -196,6 +189,7 @@ export const { use: useNotification, provider: NotificationProvider } = createSi
         unseenCount: (session: string) => selected().session.unseenCount(session),
         unseenHasError: (session: string) => selected().session.unseenHasError(session),
         markViewed: (session: string) => selected().session.markViewed(session),
+        markUnread: (session: string, directory?: string) => selected().session.markUnread(session, directory),
       },
       project: {
         all: (directory: string) => selected().project.all(directory),
@@ -213,9 +207,6 @@ type NotificationState = ReturnType<typeof createServerNotificationState>
 function createServerNotificationState(input: {
   sdk: ServerSDK
   sync: ServerSync
-  active: Accessor<boolean>
-  directory: Accessor<string | undefined>
-  sessionID: Accessor<string | undefined>
   platform: ReturnType<typeof usePlatform>
   settings: ReturnType<typeof useSettings>
   language: ReturnType<typeof useLanguage>
@@ -228,9 +219,6 @@ function createServerNotificationState(input: {
   const language = input.language
 
   const empty: Notification[] = []
-
-  const currentDirectory = input.directory
-  const currentSession = input.sessionID
 
   const [store, setStore, _, ready] = persisted(
     Persist.serverGlobal(serverSDK().scope, "notification", ["notification.v1"]),
@@ -325,16 +313,6 @@ function createServerNotificationState(input: {
       .catch(() => undefined)
   }
 
-  const viewedInCurrentSession = (directory: string, sessionID?: string) => {
-    if (!input.active()) return false
-    const activeDirectory = currentDirectory()
-    const activeSession = currentSession()
-    if (!activeSession) return false
-    if (!sessionID) return false
-    if (activeDirectory && directory !== activeDirectory) return false
-    return sessionID === activeSession
-  }
-
   const handleSessionIdle = (directory: string, event: { properties: { sessionID?: string } }, time: number) => {
     const sessionID = event.properties.sessionID
     void lookup(directory, sessionID).then((session) => {
@@ -349,7 +327,7 @@ function createServerNotificationState(input: {
       append({
         directory,
         time,
-        viewed: viewedInCurrentSession(directory, sessionID),
+        viewed: false,
         type: "turn-complete",
         session: sessionID,
       })
@@ -381,7 +359,7 @@ function createServerNotificationState(input: {
       append({
         directory,
         time,
-        viewed: viewedInCurrentSession(directory, sessionID),
+        viewed: false,
         type: "error",
         session: sessionID ?? "global",
         error,
@@ -444,6 +422,18 @@ function createServerNotificationState(input: {
             )
             updateUnseen("project", directory, next)
           })
+        })
+      },
+      markUnread(session: string, directory?: string) {
+        const unseen = index.session.unseen[session] ?? empty
+        if (unseen.length) return
+
+        append({
+          session,
+          directory,
+          time: Date.now(),
+          viewed: false,
+          type: "turn-complete",
         })
       },
     },

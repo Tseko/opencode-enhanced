@@ -33,8 +33,7 @@ const layer = Layer.effectDiscard(
         codec: Schema.toCodecJson(Files),
         load: Effect.succeed(value),
         baseline: render,
-        update: (_previous, current) =>
-          `These instructions replace all previously loaded ambient instructions.\n\n${render(current)}`,
+        update: (previous, current) => updateInstructions(previous, current),
         removed: () => "Previously loaded instructions no longer apply.",
       })
 
@@ -126,6 +125,96 @@ export const node = makeLocationNode({
   deps: [FSUtil.node, Global.node, Location.node, SystemContextRegistry.node],
 })
 
+export const MAX_FILE_BYTES = 32 * 1024
+export const MAX_FILE_LINES = 400
+export const MAX_TOTAL_BYTES = 64 * 1024
+
+const TRUNCATED_MARKER = (path: string) =>
+  `[truncated: ${path} exceeds the ambient instruction budget. Use the read tool on this path to load the rest.]`
+const OMITTED_MARKER = (path: string) =>
+  `[omitted: ${path} exceeds the ambient instruction budget. Use the read tool on this path to load it.]`
+
 function render(files: ReadonlyArray<File>) {
-  return files.map((file) => `Instructions from: ${file.path}\n${file.content}`).join("\n\n")
+  return renderFiles(files).join("\n\n")
+}
+
+function updateInstructions(previous: ReadonlyArray<File>, current: ReadonlyArray<File>) {
+  const previousByPath = new Map(previous.map((file) => [file.path, file.content]))
+  const currentByPath = new Map(current.map((file) => [file.path, file.content]))
+  const parts = [
+    ...previous.flatMap((file) =>
+      currentByPath.has(file.path)
+        ? []
+        : [
+            {
+              content: `Instructions from: ${file.path} no longer apply.`,
+              omitted: `Instructions from: ${file.path} no longer apply.`,
+            },
+          ],
+    ),
+    ...current.flatMap((file) => {
+      const prior = previousByPath.get(file.path)
+      if (prior === undefined)
+        return [
+          {
+            content: `Instructions from: ${file.path}\n${capContent(file.content, file.path)}`,
+            omitted: `Instructions from: ${file.path}\n${OMITTED_MARKER(file.path)}`,
+          },
+        ]
+      if (prior === file.content) return []
+      return [
+        {
+          content: `Updated instructions from: ${file.path}\n${capContent(file.content, file.path)}`,
+          omitted: `Updated instructions from: ${file.path}\n${OMITTED_MARKER(file.path)}`,
+        },
+      ]
+    }),
+  ]
+  if (parts.length === 0) return render(current)
+  return withinTotalBudget(parts).join("\n\n")
+}
+
+function renderFiles(files: ReadonlyArray<File>) {
+  return withinTotalBudget(
+    files.map((file) => ({
+      content: `Instructions from: ${file.path}\n${capContent(file.content, file.path)}`,
+      omitted: `Instructions from: ${file.path}\n${OMITTED_MARKER(file.path)}`,
+    })),
+  )
+}
+
+function withinTotalBudget(parts: ReadonlyArray<{ content: string; omitted: string }>) {
+  return parts.reduce(
+    (state, part) => {
+      const separator = state.result.length === 0 ? "" : "\n\n"
+      const contentBytes = Buffer.byteLength(separator + part.content, "utf-8")
+      if (state.used + contentBytes <= MAX_TOTAL_BYTES)
+        return { result: [...state.result, part.content], used: state.used + contentBytes }
+      const omittedBytes = Buffer.byteLength(separator + part.omitted, "utf-8")
+      if (state.used + omittedBytes <= MAX_TOTAL_BYTES)
+        return { result: [...state.result, part.omitted], used: state.used + omittedBytes }
+      return state
+    },
+    { result: [] as string[], used: 0 },
+  ).result
+}
+
+function capContent(content: string, path: string) {
+  const lines = content.split("\n")
+  const overLines = lines.length - Number(lines.at(-1) === "") > MAX_FILE_LINES
+  const selected = overLines ? lines.slice(0, MAX_FILE_LINES).join("\n") : content
+  if (!overLines && Buffer.byteLength(selected, "utf-8") <= MAX_FILE_BYTES) return content
+  return `${takePrefix(selected, MAX_FILE_BYTES)}\n${TRUNCATED_MARKER(path)}`
+}
+
+function takePrefix(input: string, maximumBytes: number) {
+  let bytes = 0
+  let content = ""
+  for (const char of input) {
+    const size = Buffer.byteLength(char, "utf-8")
+    if (bytes + size > maximumBytes) break
+    content += char
+    bytes += size
+  }
+  return content
 }

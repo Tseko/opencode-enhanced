@@ -20,11 +20,12 @@ import { Accordion } from "@opencode-ai/ui/accordion"
 import { Button } from "@opencode-ai/ui/button"
 import { Card } from "@opencode-ai/ui/card"
 import {
-  ContextToolGroup,
   Message,
   MessageDivider,
   Part as MessagePart,
   partDefaultOpen,
+  toolActionCountItems,
+  ToolGroup,
   type UserActions,
 } from "@opencode-ai/session-ui/message-part"
 import { DiffChanges } from "@opencode-ai/ui/diff-changes"
@@ -40,11 +41,10 @@ import { DialogFooter, DialogHeader, DialogTitleGroup, DialogV2 } from "@opencod
 import { InlineInput } from "@opencode-ai/ui/inline-input"
 import { ButtonV2 } from "@opencode-ai/ui/v2/button-v2"
 import { SessionRetry } from "@opencode-ai/session-ui/session-retry"
+import { SessionThinking } from "@opencode-ai/session-ui/session-thinking"
 import { isScrollKeyTarget, scrollKey, scrollKeyOwner, ScrollView } from "@opencode-ai/ui/scroll-view"
 import { StickyAccordionHeader } from "@opencode-ai/ui/sticky-accordion-header"
 import { TextField } from "@opencode-ai/ui/text-field"
-import { TextReveal } from "@opencode-ai/ui/text-reveal"
-import { TextShimmer } from "@opencode-ai/ui/text-shimmer"
 import type {
   AssistantMessage,
   Message as MessageType,
@@ -88,7 +88,14 @@ type FramedTimelineRow = Exclude<TimelineRow.TimelineRow, { _tag: "TurnGap" }>
 type TimelineRowByTag<T extends TimelineRow.TimelineRow["_tag"]> = Extract<TimelineRow.TimelineRow, { _tag: T }>
 
 const timelineFallbackItemSize = 60
-const timelineCache = new Map<string, { measurements: VirtualItem[]; toolOpen: Record<string, boolean | undefined> }>()
+const timelineCache = new Map<
+  string,
+  {
+    measurements: VirtualItem[]
+    toolOpen: Record<string, boolean | undefined>
+    userMessageOpen: Record<string, boolean | undefined>
+  }
+>()
 
 const taskDescription = (part: PartType, sessionID: string) => {
   if (part.type !== "tool" || part.tool !== "task") return
@@ -127,19 +134,6 @@ const markBoundaryGesture = (input: {
   ) {
     input.onMarkScrollGesture(input.root)
   }
-}
-
-function TimelineThinkingRow(props: { reasoningHeading?: string; showReasoningSummaries: boolean }) {
-  const language = useLanguage()
-
-  return (
-    <div data-slot="session-turn-thinking">
-      <TextShimmer text={language.t("ui.sessionTurn.status.thinking")} />
-      <Show when={!props.showReasoningSummaries}>
-        <TextReveal text={props.reasoningHeading} class="session-turn-thinking-heading" travel={25} duration={700} />
-      </Show>
-    </div>
-  )
 }
 
 function TimelineDiffSummaryRow(props: { diffs: SummaryDiff[] }) {
@@ -409,6 +403,10 @@ export function MessageTimeline(props: {
   }
 
   const [toolOpen, setToolOpen] = createStore<Record<string, boolean | undefined>>(cached?.toolOpen ?? {})
+  const [userMessageOpen, setUserMessageOpen] = createStore<Record<string, boolean | undefined>>(
+    cached?.userMessageOpen ?? {},
+  )
+  const [scrollTop, setScrollTop] = createSignal(0)
   const [renderOverscan, setRenderOverscan] = createSignal(initialMeasurements?.length || coldBottomMount ? 6 : 20)
   let resizePinnedIndexes: number[] = []
   let resizePinFrame: number | undefined
@@ -497,6 +495,53 @@ export function MessageTimeline(props: {
     () => new Map(virtualizer.getVirtualItems().map((item) => [item.key, item] as const)),
   )
   const virtualRowKeys = createMemo(() => virtualizer.getVirtualItems().map((item) => item.key as string))
+
+  // The user message of the turn currently occupying the top of the viewport. While
+  // scrolling, it stays pinned below the session title until the next user message
+  // arrives; scrolling back up releases it when its own row returns into view.
+  const userMessageRows = createMemo(() =>
+    timelineRows().flatMap((row, index) => (row._tag === "UserMessage" ? [{ index, messageID: row.userMessageID }] : [])),
+  )
+  const pinnedUserMessage = createMemo(() => {
+    const rows = userMessageRows()
+    // Subscribe to virtual item measurements so the pin re-evaluates as rows resize.
+    for (const item of virtualizer.getVirtualItems()) void item.size
+    if (rows.length === 0) return
+    const line = scrollTop() + (showHeader() ? 48 : 0)
+    const measurements = virtualizer.measurementsCache
+    const measured = (index: number) => virtualizer.itemSizeCache.has(virtualizer.options.getItemKey(index))
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const item = measurements[rows[i].index]
+      // Only rows that fully scrolled past the pin line are eligible, and the row must
+      // have been measured so estimate-only starts cannot pin the wrong message.
+      if (!item || item.end > line || !measured(rows[i].index)) continue
+      const next = rows[i + 1]
+      const nextItem = next ? measurements[next.index] : undefined
+      // Slide the pin out as the next message approaches the pin line, mirroring how a
+      // sticky element gets pushed out by the next section.
+      const slide =
+        next && nextItem && measured(next.index) ? Math.max(0, line + item.size - nextItem.start) : 0
+      if (slide >= item.size) continue
+      return { messageID: rows[i].messageID, slide }
+    }
+  })
+  const pinnedMessage = createMemo(() => {
+    const id = pinnedUserMessage()?.messageID
+    if (!id) return
+    const message = messageByID().get(id)
+    if (message?.role === "user") return message
+  })
+  const pinnedSlide = createMemo(() => pinnedUserMessage()?.slide ?? 0)
+  const pinnedParts = createMemo(() => {
+    const message = pinnedMessage()
+    return message ? getMsgParts(message.id) : emptyParts
+  })
+  const pinnedComments = createMemo(() => {
+    const message = pinnedMessage()
+    if (!message || !settings.general.newLayoutDesigns()) return []
+    return getMsgParts(message.id).flatMap((part) => MessageComment.fromPart(part) ?? [])
+  })
+
   createEffect(() => {
     props.setRevealMessage?.((id) => {
       const index = messageRowIndex().get(id)
@@ -542,7 +587,11 @@ export function MessageTimeline(props: {
   onCleanup(() => {
     clearPrependAnchor()
     timelineCache.delete(ownerSessionKey)
-    timelineCache.set(ownerSessionKey, { measurements: virtualizer.takeSnapshot(), toolOpen: { ...toolOpen } })
+    timelineCache.set(ownerSessionKey, {
+      measurements: virtualizer.takeSnapshot(),
+      toolOpen: { ...toolOpen },
+      userMessageOpen: { ...userMessageOpen },
+    })
     while (timelineCache.size > 16) timelineCache.delete(timelineCache.keys().next().value!)
     if (resizePinFrame !== undefined) cancelAnimationFrame(resizePinFrame)
     if (overscanFrame !== undefined) cancelAnimationFrame(overscanFrame)
@@ -630,6 +679,7 @@ export function MessageTimeline(props: {
   }
 
   const handleListScroll = (event: Event & { currentTarget: HTMLDivElement }) => {
+    setScrollTop(event.currentTarget.scrollTop)
     if (prependLoading) updatePrependAnchor()
     props.onScheduleScrollState(event.currentTarget)
     props.onHistoryScroll()
@@ -973,29 +1023,75 @@ export function MessageTimeline(props: {
   }
 
   const renderAssistantPartGroup = (row: Accessor<TimelineRowMap["AssistantPart"]>, onSizeChange?: () => void) => {
-    if (row().group.type === "context") {
+    if (row().group.type === "tool") {
+      const group = createMemo(() => {
+        const value = row().group
+        if (value.type !== "tool") return
+        return value
+      })
+      const refs = createMemo(() => group()?.refs ?? [])
       const parts = createMemo(() => {
-        const group = row().group
-        if (group.type !== "context") return emptyTools
-        return group.refs
+        return refs()
           .map((ref) => getMsgPart(ref.messageID, ref.partID))
           .filter((part): part is ToolPart => part?.type === "tool")
       })
-      const contextOpenKey = () => `context:${row().group.key}`
+      const groupOpenKey = () => `group:${row().group.key}`
       const open = createMemo(() => {
-        return toolOpen[contextOpenKey()] === true
+        return toolOpen[groupOpenKey()] === true
       })
 
       return (
-        <ContextToolGroup
+        <ToolGroup
           parts={parts()}
+          kind={group()?.kind ?? "tool"}
           open={open()}
-          onOpenChange={(value) => setToolOpen(contextOpenKey(), value)}
+          onOpenChange={(value) => setToolOpen(groupOpenKey(), value)}
           busy={
             workingTurn(row().userMessageID) && lastAssistantGroupKey().get(row().userMessageID) === row().group.key
           }
           onSizeChange={onSizeChange}
-        />
+        >
+          <Show when={group()?.kind !== "context"}>
+            <Index each={refs()}>
+              {(refAccessor) => {
+                const message = createMemo(() => messageByID().get(refAccessor().messageID))
+                const part = createMemo(() => getMsgPart(refAccessor().messageID, refAccessor().partID))
+                const defaultOpen = createMemo(() => {
+                  const item = part()
+                  if (!item) return
+                  return partDefaultOpen(
+                    item,
+                    settings.general.shellToolPartsExpanded(),
+                    settings.general.editToolPartsExpanded(),
+                  )
+                })
+                return (
+                  <Show when={message()}>
+                    {(message) => (
+                      <Show when={part()}>
+                        {(part) => (
+                          <MessagePart
+                            part={part()}
+                            message={message()}
+                            showAssistantCopyPartID={assistantCopyPartID(row().userMessageID)}
+                            turnDurationMs={turnDurationMs(row().userMessageID)}
+                            useV2Actions={settings.general.newLayoutDesigns()}
+                            defaultOpen={defaultOpen()}
+                            toolOpen={toolOpen[part().id] ?? defaultOpen()}
+                            onToolOpenChange={(open) => setToolOpen(part().id, open)}
+                            deferToolContent
+                            virtualizeDiff={false}
+                            onContentRendered={onSizeChange}
+                          />
+                        )}
+                      </Show>
+                    )}
+                  </Show>
+                )
+              }}
+            </Index>
+          </Show>
+        </ToolGroup>
       )
     }
 
@@ -1139,6 +1235,8 @@ export function MessageTimeline(props: {
                       actions={props.actions}
                       useV2Actions={settings.general.newLayoutDesigns()}
                       comments={messageComments()}
+                      userMessageOpen={userMessageOpen[userMessageRow().userMessageID]}
+                      onUserMessageOpenChange={(open) => setUserMessageOpen(userMessageRow().userMessageID, open)}
                     />
                   </div>
                 </div>
@@ -1180,10 +1278,24 @@ export function MessageTimeline(props: {
       }
       case "Thinking": {
         const thinkingRow = row as Accessor<TimelineRowByTag<"Thinking">>
+        const startedAt = createMemo(() => {
+          const message = messageByID().get(thinkingRow().userMessageID)
+          if (message?.role !== "user") return
+          return message.time.created
+        })
+        const counts = createMemo(() =>
+          toolActionCountItems(
+            (assistantMessagesByParent().get(thinkingRow().userMessageID) ?? emptyAssistantMessages).flatMap(
+              (message) => getMsgParts(message.id),
+            ),
+          ),
+        )
         return (
           <TimelineRowFrame row={thinkingRow}>
             <div data-slot="session-turn-message-container" class="w-full px-4 md:px-5">
-              <TimelineThinkingRow
+              <SessionThinking
+                counts={counts()}
+                startedAt={startedAt()}
                 reasoningHeading={thinkingRow().reasoningHeading}
                 showReasoningSummaries={settings.general.showReasoningSummaries()}
               />
@@ -1818,6 +1930,46 @@ export function MessageTimeline(props: {
               </Show>
             </div>
           </div>
+        </Show>
+        <Show when={pinnedMessage()}>
+          {(message) => (
+            <div
+              data-component="user-message-pin"
+              class="sticky z-20 h-0 w-full pointer-events-none"
+              classList={{ "top-12": showHeader(), "top-0": !showHeader() }}
+              style={{ transform: `translateY(-${pinnedSlide()}px)` }}
+            >
+              <div class="absolute inset-x-0 pointer-events-none">
+                <div
+                  classList={{
+                    "w-full px-4 md:px-5 pointer-events-none": true,
+                    "md:max-w-200 md:mx-auto 2xl:max-w-[1000px]": props.centered,
+                  }}
+                >
+                  <div
+                    class="pointer-events-auto"
+                    classList={{
+                      "bg-[linear-gradient(to_bottom,var(--v2-background-bg-base)_calc(100%-16px),transparent)]":
+                        settings.general.newLayoutDesigns(),
+                      "bg-[linear-gradient(to_bottom,var(--background-stronger)_calc(100%-16px),transparent)]":
+                        !settings.general.newLayoutDesigns(),
+                    }}
+                  >
+                    <Message
+                      message={message()}
+                      parts={pinnedParts()}
+                      actions={props.actions}
+                      useV2Actions={settings.general.newLayoutDesigns()}
+                      comments={pinnedComments()}
+                      userMessageOpen={userMessageOpen[message().id]}
+                      onUserMessageOpenChange={(open) => setUserMessageOpen(message().id, open)}
+                      partIdentity={false}
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
         </Show>
         <div
           data-timeline-virtual-content

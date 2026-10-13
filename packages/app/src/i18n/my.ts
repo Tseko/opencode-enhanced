@@ -111,6 +111,8 @@ export const dict = {
   "command.category.workspace": "အလုပ်နေရာ",
   "command.category.settings": "ဆက်တင်များ",
   "command.logs.export": "မှတ်တမ်းများကို ထုတ်ယူပါ။",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "စနစ်",
   "theme.scheme.light": "အလင်း",
   "theme.scheme.dark": "အမှောင်",

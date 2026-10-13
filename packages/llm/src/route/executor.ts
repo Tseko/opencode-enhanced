@@ -1,4 +1,4 @@
-import { Cause, Context, Effect, Layer, Random } from "effect"
+import { Cause, Context, Effect, Layer, Option, Random } from "effect"
 import {
   FetchHttpClient,
   Headers,
@@ -23,6 +23,7 @@ import {
   UnknownProviderReason,
 } from "../schema"
 import { isContextOverflow } from "../provider-error"
+import { ProviderAdmission } from "./admission"
 
 export interface Interface {
   readonly execute: (
@@ -33,7 +34,10 @@ export interface Interface {
 export class Service extends Context.Service<Service, Interface>()("@opencode/LLM/RequestExecutor") {}
 
 const BODY_LIMIT = 16_384
-const MAX_RETRIES = 2
+// Keep at most one narrowly scoped retry before a stream begins. Turn-level
+// retries belong to the session runner, which knows whether assistant content
+// has already been published.
+const MAX_RETRIES = 1
 const BASE_DELAY_MS = 500
 const MAX_DELAY_MS = 10_000
 const REDACTED = "<redacted>"
@@ -363,10 +367,21 @@ const retryStatusFailures = <A, R>(
     )
   })
 
+const admissionKey = (request: HttpClientRequest.HttpClientRequest): ProviderAdmission.Key => {
+  const headers = normalizedHeaders(request.headers)
+  const credential = headers["authorization"] ?? headers["x-api-key"] ?? headers["api-key"] ?? ""
+  return {
+    provider: URL.canParse(request.url) ? new URL(request.url).host : "",
+    credential: credential ? ProviderAdmission.fingerprint(credential) : "anonymous",
+  }
+}
+
 export const layer: Layer.Layer<Service, never, HttpClient.HttpClient> = Layer.effect(
   Service,
   Effect.gen(function* () {
     const http = yield* HttpClient.HttpClient
+    const admissionOption = yield* Effect.serviceOption(ProviderAdmission.Service)
+    const admission = Option.getOrUndefined(admissionOption) ?? (yield* ProviderAdmission.make())
     const executeOnce = (request: HttpClientRequest.HttpClientRequest) =>
       Effect.gen(function* () {
         const redactedNames = yield* Headers.CurrentRedactedNames
@@ -374,9 +389,18 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient> = Layer.e
           .execute(request)
           .pipe(Effect.mapError(toHttpError(redactedNames)), Effect.flatMap(statusError(request, redactedNames)))
       })
-    return Service.of({
-      execute: (request) => retryStatusFailures(executeOnce(request)),
-    })
+    const execute = (request: HttpClientRequest.HttpClientRequest) =>
+      admission.acquire(admissionKey(request)).pipe(
+        Effect.flatMap((release) =>
+          retryStatusFailures(executeOnce(request)).pipe(
+            Effect.ensuring(release),
+            Effect.tapError((error) =>
+              error.retryable ? admission.record(admissionKey(request), error.retryAfterMs) : Effect.void,
+            ),
+          ),
+        ),
+      )
+    return Service.of({ execute })
   }),
 )
 

@@ -110,6 +110,8 @@ export const dict = {
   "command.category.workspace": "Радни простор",
   "command.category.settings": "Подешавања",
   "command.logs.export": "Извоз евиденције",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "Систем",
   "theme.scheme.light": "Светло",
   "theme.scheme.dark": "Тамно",

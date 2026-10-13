@@ -110,6 +110,8 @@ export const dict = {
   "command.category.workspace": "Arbetsyta",
   "command.category.settings": "Inställningar",
   "command.logs.export": "Exportera loggar",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "System",
   "theme.scheme.light": "Ljus",
   "theme.scheme.dark": "Mörk",

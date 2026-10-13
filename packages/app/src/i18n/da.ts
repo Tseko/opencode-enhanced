@@ -17,6 +17,8 @@ export const dict = {
   "command.category.workspace": "Arbejdsområde",
 
   "command.category.settings": "Indstillinger",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "System",
   "theme.scheme.light": "Lys",
   "theme.scheme.dark": "Mørk",

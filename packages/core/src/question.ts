@@ -58,6 +58,8 @@ export interface Interface {
   readonly reply: (input: ReplyInput) => Effect.Effect<void, NotFoundError>
   readonly reject: (requestID: ID) => Effect.Effect<void, NotFoundError>
   readonly list: () => Effect.Effect<ReadonlyArray<Request>>
+  /** Rejects every pending prompt for a Session so interruption can finish. */
+  readonly interrupt: (sessionID: SessionSchema.ID) => Effect.Effect<void>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/Question") {}
@@ -144,7 +146,23 @@ const layer = Layer.effect(
       return Array.from(pending.values(), (item) => item.request)
     })
 
-    return Service.of({ ask, reply, reject, list })
+    const interrupt = Effect.fn("QuestionV2.interrupt")((sessionID: SessionSchema.ID) =>
+      Effect.uninterruptible(
+        Effect.gen(function* () {
+          const requests = Array.from(pending.entries()).filter(([, item]) => item.request.sessionID === sessionID)
+          for (const [id, item] of requests) {
+            yield* events.publish(Event.Rejected, {
+              sessionID: item.request.sessionID,
+              requestID: item.request.id,
+            })
+            yield* Deferred.fail(item.deferred, new RejectedError())
+            pending.delete(id)
+          }
+        }),
+      ),
+    )
+
+    return Service.of({ ask, reply, reject, list, interrupt })
   }),
 )
 

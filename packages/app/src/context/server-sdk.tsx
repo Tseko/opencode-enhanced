@@ -13,6 +13,7 @@ import { useGlobal } from "./global"
 import { ServerScope } from "@/utils/server-scope"
 import { detectServerProtocol, type ServerProtocol } from "@/utils/server-protocol"
 import { createCompatibleApi, type CompatibleApi } from "@/utils/server-compat"
+import { currentV2Event } from "./server-session-v2-reducer"
 
 const isAbortError = (error: unknown) =>
   error !== null && typeof error === "object" && "name" in error && error.name === "AbortError"
@@ -139,20 +140,28 @@ export function coalesceServerEvents(events: QueuedServerEvent[]) {
 }
 
 function currentDelta(event: OpenCodeEvent | undefined): CurrentDelta | undefined {
+  if (!event) return
+  const current = currentV2Event(event)
   if (
-    event?.type === "session.text.delta" ||
-    event?.type === "session.reasoning.delta" ||
-    event?.type === "session.tool.input.delta" ||
-    event?.type === "session.compaction.delta"
+    current.type === "session.text.delta" ||
+    current.type === "session.reasoning.delta" ||
+    current.type === "session.tool.input.delta" ||
+    current.type === "session.compaction.delta"
   )
-    return event
+    return current as CurrentDelta
 }
 
 function currentDeltaKey(event: CurrentDelta) {
   if (event.type === "session.tool.input.delta")
     return `${event.type}:${event.data.sessionID}:${event.data.assistantMessageID}:${event.data.callID}`
   if (event.type === "session.compaction.delta") return `${event.type}:${event.data.sessionID}`
-  return `${event.type}:${event.data.sessionID}:${event.data.assistantMessageID}:${event.data.ordinal}`
+  return `${event.type}:${event.data.sessionID}:${event.data.assistantMessageID}:${currentDeltaStream(event.data)}`
+}
+
+function currentDeltaStream(data: object) {
+  if ("ordinal" in data && typeof data.ordinal === "number") return data.ordinal
+  if ("textID" in data && typeof data.textID === "string") return data.textID
+  if ("reasoningID" in data && typeof data.reasoningID === "string") return data.reasoningID
 }
 
 function currentDeltaFragment(event: CurrentDelta) {

@@ -1,5 +1,6 @@
 import { Layer, ManagedRuntime } from "effect"
 import { attach } from "./run-service"
+import { InstanceLoader } from "./instance-loader"
 import * as Observability from "@opencode-ai/core/observability"
 
 import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -133,3 +134,9 @@ export const AppRuntime: Runtime = {
   },
   dispose: () => rt.dispose(),
 }
+
+// Location-scoped layers load an instance through this leaf module instead of importing the
+// app graph, which would close a module cycle through `Command` and `MCP`.
+InstanceLoader.register((directory) =>
+  AppRuntime.runPromise(InstanceStore.Service.use((store) => store.load({ directory }))),
+)

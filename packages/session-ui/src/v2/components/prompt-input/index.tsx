@@ -174,7 +174,9 @@ export function PromptInputV2(props: PromptInputV2Props) {
               if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
                 event.preventDefault()
                 if (event.repeat) return
-                props.controller.submit()
+                props.controller.submit({
+                  queue: (event.ctrlKey || event.metaKey) && !event.altKey,
+                })
               }
             }}
             onKeyUp={updateCursor}
@@ -257,10 +259,15 @@ export function PromptInputV2(props: PromptInputV2Props) {
           <PromptInputV2SubmitButton
             mode={state.mode}
             stopping={view.submit.stopping()}
+            working={view.submit.working?.() ?? false}
             disabled={!props.controller.canSubmit()}
             sendLabel={i18n.t("ui.promptInput.send")}
             stopLabel={i18n.t("ui.promptInput.stop")}
-            onSubmit={props.controller.submit}
+            sendNowLabel={view.submit.sendNowLabel}
+            queueLabel={view.submit.queueLabel}
+            queueShortcut={view.submit.queueShortcut}
+            onSubmit={() => props.controller.submit()}
+            onQueue={() => props.controller.submit({ queue: true })}
             onStop={props.controller.stop}
           />
         </div>
@@ -672,42 +679,75 @@ export function PromptInputV2Popover(props: {
 export function PromptInputV2SubmitButton(props: {
   mode: PromptInputV2Mode
   stopping: boolean
+  working: boolean
   disabled: boolean
   sendLabel: string
   stopLabel: string
+  sendNowLabel?: string
+  queueLabel?: string
+  queueShortcut?: string
   onSubmit: () => void
+  onQueue: () => void
   onStop: () => void
 }) {
+  // Queueing only has meaning while a turn is running, so the delivery menu appears with it.
+  const deliverable = () => !props.stopping && props.working && !!props.queueLabel
   return (
-    <TooltipV2
-      placement="top"
-      inactive={!props.stopping && props.disabled}
-      value={props.stopping ? props.stopLabel : props.sendLabel}
-    >
-      <IconButton
-        data-action="prompt-submit"
-        type="button"
-        disabled={!props.stopping && props.disabled}
-        tabIndex={props.mode === "normal" ? undefined : -1}
-        icon={props.stopping ? "stop" : props.mode === "shell" ? "arrow-undo-down" : "arrow-up"}
-        variant="primary"
-        class="size-7 rounded-md p-[6px] text-v2-icon-icon-muted shadow-[var(--v2-elevation-button-contrast)] disabled:opacity-50"
-        style={{
-          "background-image":
-            "linear-gradient(180deg,var(--v2-alpha-light-20) 0%,var(--v2-alpha-light-0) 100%),linear-gradient(90deg,var(--v2-background-bg-contrast) 0%,var(--v2-background-bg-contrast) 100%)",
-        }}
-        aria-label={props.stopping ? props.stopLabel : props.sendLabel}
-        onClick={(event) => {
-          event.preventDefault()
-          event.stopPropagation()
-          if (props.stopping) {
-            props.onStop()
-            return
-          }
-          props.onSubmit()
-        }}
-      />
-    </TooltipV2>
+    <div class="flex items-center gap-0.5">
+      <TooltipV2
+        placement="top"
+        inactive={!props.stopping && props.disabled}
+        value={props.stopping ? props.stopLabel : props.sendLabel}
+      >
+        <IconButton
+          data-action="prompt-submit"
+          type="button"
+          disabled={!props.stopping && props.disabled}
+          tabIndex={props.mode === "normal" ? undefined : -1}
+          icon={props.stopping ? "stop" : props.mode === "shell" ? "arrow-undo-down" : "arrow-up"}
+          variant="primary"
+          class="size-7 rounded-md p-[6px] text-v2-icon-icon-muted shadow-[var(--v2-elevation-button-contrast)] disabled:opacity-50"
+          style={{
+            "background-image":
+              "linear-gradient(180deg,var(--v2-alpha-light-20) 0%,var(--v2-alpha-light-0) 100%),linear-gradient(90deg,var(--v2-background-bg-contrast) 0%,var(--v2-background-bg-contrast) 100%)",
+          }}
+          aria-label={props.stopping ? props.stopLabel : props.sendLabel}
+          onClick={(event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            if (props.stopping) {
+              props.onStop()
+              return
+            }
+            props.onSubmit()
+          }}
+        />
+      </TooltipV2>
+      <Show when={deliverable()}>
+        <MenuV2 gutter={6} placement="top-end">
+          <MenuV2.Trigger
+            as="button"
+            type="button"
+            data-action="prompt-delivery-menu"
+            tabIndex={props.mode === "normal" ? undefined : -1}
+            aria-label={props.queueLabel}
+            class="flex size-7 items-center justify-center rounded-md text-v2-icon-icon-muted transition-colors hover:bg-v2-overlay-simple-overlay-hover"
+          >
+            <IconV2 name="outline-chevron-down" size="small" />
+          </MenuV2.Trigger>
+          <MenuV2.Portal>
+            <MenuV2.Content style={{ "min-width": "200px" }}>
+              <MenuV2.Item shortcut="↵" onSelect={() => props.onSubmit()}>
+                {props.sendNowLabel ?? props.sendLabel}
+              </MenuV2.Item>
+              <MenuV2.Item shortcut={props.queueShortcut} onSelect={() => props.onQueue()}>
+                {props.queueLabel}
+              </MenuV2.Item>
+            </MenuV2.Content>
+          </MenuV2.Portal>
+        </MenuV2>
+      </Show>
+    </div>
   )
 }
 

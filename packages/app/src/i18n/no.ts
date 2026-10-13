@@ -120,6 +120,8 @@ export const dict = {
   "command.category.settings": "Innstillinger",
   "command.logs.export": "Eksporter logger",
 
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "System",
   "theme.scheme.light": "Lys",
   "theme.scheme.dark": "Mørk",

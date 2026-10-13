@@ -53,11 +53,13 @@ describe("ModelsDevPlugin", () => {
                   cost: {
                     input: 2.5,
                     output: 15,
+                    reasoning: 9,
                     tiers: [
                       {
                         tier: { type: "context", size: 272_000 },
                         input: 3,
                         output: 18,
+                        reasoning: 12,
                         cache_read: 0.25,
                       },
                     ],
@@ -107,11 +109,12 @@ describe("ModelsDevPlugin", () => {
         variants: [],
       })
       expect(fast?.cost).toEqual([
-        { input: 5, output: 30, cache: { read: 0.5, write: 0 } },
+        { input: 5, output: 30, reasoning: 9, cache: { read: 0.5, write: 0 } },
         {
           tier: { type: "context", size: 272_000 },
           input: 3,
           output: 18,
+          reasoning: 12,
           cache: { read: 0.25, write: 0 },
         },
         {

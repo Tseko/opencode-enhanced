@@ -115,6 +115,8 @@ export const dict = {
   "command.category.workspace": "ワークスペース",
   "command.category.settings": "設定",
   "command.logs.export": "ログをエクスポート",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "システム",
   "theme.scheme.light": "ライト",
   "theme.scheme.dark": "ダーク",

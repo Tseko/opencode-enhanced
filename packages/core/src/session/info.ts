@@ -96,6 +96,13 @@ export function toV1(row: typeof SessionTable.$inferSelect): SessionV1.SessionIn
         : undefined,
     metadata: row.metadata ?? undefined,
     permission: row.permission ? [...row.permission] : undefined,
-    revert: row.revert ? { ...row.revert, messageID: SessionMessage.ID.make(row.revert.messageID) } : undefined,
+    revert: row.revert
+      ? {
+          messageID: SessionV1.MessageID.make(row.revert.messageID),
+          partID: row.revert.partID ? SessionV1.PartID.make(row.revert.partID) : undefined,
+          snapshot: row.revert.snapshot,
+          diff: row.revert.diff,
+        }
+      : undefined,
   })
 }

@@ -117,6 +117,8 @@ export const dict = {
   "command.category.workspace": "Espaço de trabalho",
   "command.category.settings": "Configurações",
   "command.logs.export": "Exportar logs",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "Sistema",
   "theme.scheme.light": "Claro",
   "theme.scheme.dark": "Escuro",

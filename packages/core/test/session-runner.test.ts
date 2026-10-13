@@ -4,12 +4,14 @@ import {
   LLMError,
   LLMEvent,
   Model,
+  RateLimitReason,
   TransportReason,
   InvalidRequestReason,
   type LLMClientShape,
   type LLMRequest,
 } from "@opencode-ai/llm"
 import * as OpenAIChat from "@opencode-ai/llm/protocols/openai-chat"
+import { SessionStatusEvent } from "@opencode-ai/schema/session-status-event"
 import { Database } from "@opencode-ai/core/database/database"
 import { makeLocationNode } from "@opencode-ai/core/effect/app-node"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
@@ -35,6 +37,7 @@ import { SessionRunCoordinator } from "@opencode-ai/core/session/run-coordinator
 import { SessionRunner } from "@opencode-ai/core/session/runner"
 import * as SessionRunnerLLM from "@opencode-ai/core/session/runner/llm"
 import { SessionRunnerModel } from "@opencode-ai/core/session/runner/model"
+import { TurnRetry } from "@opencode-ai/core/session/runner/retry"
 import { ToolRegistry } from "@opencode-ai/core/tool/registry"
 import { ApplicationTools } from "@opencode-ai/core/tool/application-tools"
 import { AgentV2 } from "@opencode-ai/core/agent"
@@ -48,6 +51,8 @@ import {
   SessionTable,
 } from "@opencode-ai/core/session/sql"
 import { SessionStore } from "@opencode-ai/core/session/store"
+import { SessionTurn } from "@opencode-ai/core/session/turn"
+import { SessionFailure } from "@opencode-ai/core/session/failure"
 import { SystemContext } from "@opencode-ai/core/system-context"
 import { SystemContextRegistry } from "@opencode-ai/core/system-context/registry"
 import { SkillGuidance } from "@opencode-ai/core/skill/guidance"
@@ -55,7 +60,8 @@ import { ReferenceGuidance } from "@opencode-ai/core/reference/guidance"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { Location } from "@opencode-ai/core/location"
 import { ProviderV2 } from "@opencode-ai/core/provider"
-import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
+import { Cause, DateTime, Deferred, Duration, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
+import { adjust } from "effect/testing/TestClock"
 import { asc, eq } from "drizzle-orm"
 import { testEffect } from "./lib/effect"
 
@@ -66,6 +72,10 @@ let responseStream: Stream.Stream<LLMEvent, LLMError> | undefined
 let streamGate: Deferred.Deferred<void> | undefined
 let streamStarted: Deferred.Deferred<void> | undefined
 let streamFailure: LLMError | undefined
+// Fail the next N stream calls with `transientStreamFailure` before falling through to
+// the normal response logic, so drains can be exercised across retry boundaries.
+let transientStreamFailures = 0
+let transientStreamFailure: LLMError | undefined
 let toolExecutionGate: Deferred.Deferred<void> | undefined
 let toolExecutionsStarted: Deferred.Deferred<void> | undefined
 let toolExecutionsReady = 5
@@ -77,6 +87,12 @@ const client = Layer.succeed(
     prepare: () => Effect.die("unused"),
     stream: ((request: LLMRequest) => {
       requests.push(request)
+      if (transientStreamFailures > 0 && transientStreamFailure) {
+        transientStreamFailures -= 1
+        const failure = transientStreamFailure
+        if (transientStreamFailures === 0) transientStreamFailure = undefined
+        return Stream.fail(failure)
+      }
       if (responseStream) {
         const stream = responseStream
         responseStream = undefined
@@ -103,11 +119,27 @@ const compactModel = Model.make({
   provider: "fake",
   route: OpenAIChat.route.with({ limits: { context: 4_000, output: 50 } }),
 })
+// The same fixture window with less headroom. The trigger now compares the provider-reported
+// request size (~766 for these fixtures) instead of the whole-request estimate (~2,000), so the
+// reserved buffer has to leave less than the real request size for compaction to fire.
+const compactWindowModel = Model.make({
+  id: "compact-window",
+  provider: "fake",
+  route: OpenAIChat.route.with({ limits: { context: 3_600, output: 50 } }),
+})
 const recoveryModel = Model.make({
   id: "recovery",
   provider: "fake",
   route: OpenAIChat.route.with({ limits: { context: 20_000, output: 1_000 } }),
 })
+// Per-1M-token USD: input 1, output 2, cache read 0.5, cache write 0.25.
+const modelPrice: readonly ModelV2.Cost[] = [{ input: 1, output: 2, cache: { read: 0.5, write: 0.25 } }]
+const modelInfo = (id: string, cost: readonly ModelV2.Cost[] = []) =>
+  ModelV2.Info.make({
+    ...ModelV2.Info.empty(ProviderV2.ID.make("fake"), ModelV2.ID.make(id)),
+    name: id,
+    cost,
+  })
 const authorizations: Tool.Context[] = []
 const executions: string[] = []
 const permission = Layer.succeed(
@@ -119,6 +151,7 @@ const permission = Layer.succeed(
     get: () => Effect.die("unused"),
     forSession: () => Effect.die("unused"),
     list: () => Effect.die("unused"),
+    interrupt: () => Effect.void,
   }),
 )
 const echo = Layer.effectDiscard(
@@ -154,9 +187,27 @@ const echo = Layer.effectDiscard(
 const echoNode = makeLocationNode({ name: "test/session-runner-tools", layer: echo, deps: [ToolRegistry.node] })
 let modelResolveHook = Effect.void
 let currentModel = model
-const models = SessionRunnerModel.layerWith((session) =>
-  modelResolveHook.pipe(Effect.as(session.model?.id === "replacement" ? replacementModel : currentModel)),
-)
+let modelFailures = 0
+let modelResolveCalls = 0
+const models = SessionRunnerModel.layerWith((session) => {
+  modelResolveCalls += 1
+  if (modelFailures > 0) {
+    modelFailures -= 1
+    return Effect.fail(
+      new SessionRunnerModel.ModelUnavailableError({
+        providerID: ProviderV2.ID.make("fake"),
+        modelID: ModelV2.ID.make("fake-model"),
+      }),
+    )
+  }
+  return modelResolveHook.pipe(
+    Effect.as(
+      session.model?.id === "replacement"
+        ? { model: replacementModel, info: modelInfo("replacement") }
+        : { model: currentModel, info: modelInfo(currentModel.id, modelPrice) },
+    ),
+  )
+})
 const systemContextKey = SystemContext.Key.make("test/context")
 let systemBaseline = "Initial context"
 let systemRemoved = false
@@ -318,9 +369,13 @@ const setup = Effect.gen(function* () {
   systemLoadHook = Effect.void
   modelResolveHook = Effect.void
   currentModel = model
+  modelFailures = 0
+  modelResolveCalls = 0
   skillBaselines.clear()
   responses = undefined
   streamFailure = undefined
+  transientStreamFailures = 0
+  transientStreamFailure = undefined
   responseStream = undefined
   streamGate = undefined
   streamStarted = undefined
@@ -344,6 +399,57 @@ const providerUnavailable = () =>
     method: "stream",
     reason: new TransportReason({ message: "Provider unavailable" }),
   })
+
+const rateLimit = (message = "Rate limit exceeded", retryAfterMs?: number) =>
+  new LLMError({
+    module: "test",
+    method: "stream",
+    reason:
+      retryAfterMs === undefined ? new RateLimitReason({ message }) : new RateLimitReason({ message, retryAfterMs }),
+  })
+
+// A full assistant text turn, used as the response that follows a retried failure.
+const turnEvents = (id: string, text: string): LLMEvent[] => [
+  LLMEvent.stepStart({ index: 0 }),
+  LLMEvent.textStart({ id }),
+  LLMEvent.textDelta({ id, text }),
+  LLMEvent.textEnd({ id }),
+  LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+  LLMEvent.finish({ reason: "stop" }),
+]
+
+const TPM_RATE_LIMIT_MESSAGE =
+  "Rate limit reached for fake/luna in organization org-test on tokens per min (TPM): " +
+  "Limit 500000, Used 453487, Requested 81138. Please try again in 20s."
+
+// Retry backoff sleeps against the merged TestClock. Advance past the worst-case
+// 30s + 25% jitter sleep until the drain settles so retries do not run in real time.
+const advanceRetryClock = (iterations = 10) =>
+  Effect.gen(function* () {
+    for (let i = 0; i < iterations; i++) {
+      yield* adjust(Duration.millis(40_000))
+      yield* Effect.yieldNow
+    }
+  })
+
+const captureStatuses = () =>
+  Effect.gen(function* () {
+    const events = yield* EventV2.Service
+    const statuses: SessionStatusEvent.Info[] = []
+    const unsubscribe = yield* events.listen((event) =>
+      event.type === SessionStatusEvent.Status.type
+        ? Effect.sync(() => {
+            const status = (event.data as { readonly status: SessionStatusEvent.Info }).status
+            if (status.type === "retry") statuses.push(status)
+          })
+        : Effect.void,
+    )
+    yield* Effect.addFinalizer(() => unsubscribe)
+    return statuses
+  })
+
+const retryAttempts = (statuses: readonly SessionStatusEvent.Info[]) =>
+  statuses.flatMap((status) => (status.type === "retry" ? [{ attempt: status.attempt, message: status.message }] : []))
 
 const setupOverflowRecovery = Effect.gen(function* () {
   yield* setup
@@ -646,7 +752,7 @@ describe("SessionRunnerLLM", () => {
 
       expect(requests).toHaveLength(1)
       expect(requests[0]?.model).toBe(model)
-      expect(requests[0]?.tools.map((tool) => tool.name)).toEqual(["echo", "defect"])
+      expect(requests[0]?.tools.map((tool) => tool.name)).toEqual(["defect", "echo"])
       expect(requests[0]?.messages.map((message) => ({ role: message.role, content: message.content }))).toEqual([
         { role: "user", content: [{ type: "text", text: "First" }] },
         { role: "user", content: [{ type: "text", text: "Second" }] },
@@ -1158,7 +1264,7 @@ describe("SessionRunnerLLM", () => {
       yield* session.prompt({ sessionID, prompt: Prompt.make({ text: earlier }), resume: false })
       yield* session.resume(sessionID)
 
-      currentModel = compactModel
+      currentModel = compactWindowModel
       requests.length = 0
       responses = [
         fragmentFixture("text", "text-summary", ["## Objective\n- Preserve the task"]).completeEvents,
@@ -1180,7 +1286,7 @@ describe("SessionRunnerLLM", () => {
     }),
   )
 
-  it.effect("summarizes an oversized newest message without retaining a fragment", () =>
+  it.effect("retains an oversized newest message whole instead of a fragment", () =>
     Effect.gen(function* () {
       yield* setup
       const session = yield* SessionV2.Service
@@ -1189,7 +1295,7 @@ describe("SessionRunnerLLM", () => {
       yield* session.resume(sessionID)
 
       const oversized = `OVERSIZED_BOUNDARY ${"x".repeat(4_500)} OVERSIZED_END`
-      currentModel = compactModel
+      currentModel = compactWindowModel
       requests.length = 0
       responses = [
         fragmentFixture("text", "text-summary", ["## Objective\n- Preserve the task"]).completeEvents,
@@ -1201,11 +1307,12 @@ describe("SessionRunnerLLM", () => {
       expect(requests).toHaveLength(2)
       const summary = userTexts(requests[0])[0]
       const continuation = userTexts(requests[1])[0]
-      expect(summary.match(/OVERSIZED_BOUNDARY/g)).toHaveLength(1)
-      expect(summary).toContain(oversized)
-      expect(continuation).not.toContain("OVERSIZED_BOUNDARY")
-      expect(continuation).not.toContain("OVERSIZED_END")
-      expect(continuation).toContain("<recent-context>\n\n</recent-context>")
+      // The newest message is retained whole rather than summarized away: it is the request the
+      // model is about to answer, so the summary prompt covers only the earlier conversation and
+      // the continuation carries the complete message.
+      expect(summary).not.toContain("OVERSIZED_BOUNDARY")
+      expect(summary).toContain("Earlier question")
+      expect(continuation).toContain(`<recent-context>\n[User]: ${oversized}`)
     }),
   )
 
@@ -1429,8 +1536,9 @@ describe("SessionRunnerLLM", () => {
       yield* session.resume(sessionID)
 
       expect(requests).toHaveLength(1)
-      expect(requests[0]?.tools.map((tool) => tool.name)).toEqual(["echo", "defect"])
-      expect(yield* session.context(sessionID)).toMatchObject([
+      expect(requests[0]?.tools.map((tool) => tool.name)).toEqual(["defect", "echo"])
+      const context = yield* session.context(sessionID)
+      expect(context).toMatchObject([
         { type: "user", text: "Use tools" },
         {
           type: "assistant",
@@ -1466,6 +1574,24 @@ describe("SessionRunnerLLM", () => {
           ],
         },
       ])
+
+      const step = context[1]
+      if (step?.type !== "assistant") throw new Error("Expected an assistant step")
+      expect(step.cost ?? 0).toBeCloseTo(0.000017, 12)
+
+      const { db } = yield* Database.Service
+      const row = yield* db
+        .select()
+        .from(SessionTable)
+        .where(eq(SessionTable.id, sessionID))
+        .get()
+        .pipe(Effect.orDie)
+      expect(row?.cost ?? 0).toBeCloseTo(0.000017, 12)
+      expect(row?.tokens_input).toBe(8)
+      expect(row?.tokens_output).toBe(3)
+      expect(row?.tokens_reasoning).toBe(1)
+      expect(row?.tokens_cache_read).toBe(2)
+      expect(row?.tokens_cache_write).toBe(0)
     }),
   )
 
@@ -2048,6 +2174,43 @@ describe("SessionRunnerLLM", () => {
     }),
   )
 
+  it.effect("starts a new prompt after interruption without an explicit resume", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Interrupt current work" }), resume: false })
+
+      requests.length = 0
+      responses = [
+        [],
+        [
+          LLMEvent.stepStart({ index: 0 }),
+          LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+          LLMEvent.finish({ reason: "stop" }),
+        ],
+      ]
+      streamGate = yield* Deferred.make<void>()
+      streamStarted = yield* Deferred.make<void>()
+
+      const run = yield* session.resume(sessionID).pipe(Effect.forkChild)
+      yield* Deferred.await(streamStarted)
+      yield* session.interrupt(sessionID)
+      expect(yield* Fiber.await(run)).toMatchObject({ _tag: "Failure" })
+      expect(requests).toHaveLength(1)
+
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Proceed" }) })
+      while (requests.length < 2) yield* Effect.yieldNow
+      yield* Deferred.succeed(streamGate, undefined)
+      while ((yield* session.active).has(sessionID)) yield* Effect.yieldNow
+      streamGate = undefined
+      streamStarted = undefined
+
+      expect(requests).toHaveLength(2)
+      expect(userTexts(requests[0]!)).toEqual(["Interrupt current work"])
+      expect(userTexts(requests[1]!)).toEqual(["Interrupt current work", "Proceed"])
+    }),
+  )
+
   it.effect("promotes queued inputs one at a time in FIFO order", () =>
     Effect.gen(function* () {
       yield* setup
@@ -2316,6 +2479,16 @@ describe("SessionRunnerLLM", () => {
           ],
         },
       ])
+      // The reconciled call is durably outcome-unknown: it was admitted to execution
+      // before the process died, so the side effect may or may not have happened and the
+      // call must not be replayed as if it had failed.
+      expect(yield* (yield* SessionStore.Service).invocations(sessionID)).toMatchObject([
+        {
+          identity: { sessionID, assistantMessageID, callID: "call-interrupted", logicalAttempt: 1 },
+          tool: "echo",
+          state: "outcome_unknown",
+        },
+      ])
     }),
   )
 
@@ -2324,6 +2497,7 @@ describe("SessionRunnerLLM", () => {
       yield* setup
       const session = yield* SessionV2.Service
       const events = yield* EventV2.Service
+      const store = yield* SessionStore.Service
       yield* session.prompt({
         sessionID,
         prompt: Prompt.make({ text: "Recover interrupted hosted tool" }),
@@ -2375,6 +2549,11 @@ describe("SessionRunnerLLM", () => {
           providerMetadata: { openai: { itemId: "call-hosted-interrupted" } },
         },
         { type: "tool-result", id: "call-hosted-interrupted", providerExecuted: true, result: { type: "error" } },
+      ])
+      // The continued turn is terminalized only after the drain consumed it, so the request
+      // above could still replay its provider-native continuation metadata.
+      expect(yield* store.turns(sessionID)).toMatchObject([
+        { id: assistantMessageID, state: "failed", error: { type: "unknown", message: SessionTurn.ORPHANED_REASON } },
       ])
     }),
   )
@@ -2992,6 +3171,45 @@ describe("SessionRunnerLLM", () => {
     }),
   )
 
+  it.effect("starts a follow-up prompt after interrupting a blocked tool", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Interrupt blocked tool" }), resume: false })
+      executions.length = 0
+      toolExecutionGate = yield* Deferred.make<void>()
+      responseStream = Stream.concat(
+        Stream.fromIterable([
+          LLMEvent.stepStart({ index: 0 }),
+          LLMEvent.toolCall({ id: "call-before-interrupt", name: "echo", input: { text: "blocked" } }),
+        ]),
+        Stream.never,
+      )
+
+      const run = yield* session.resume(sessionID).pipe(Effect.forkChild)
+      while (executions.length === 0) yield* Effect.yieldNow
+      yield* session.interrupt(sessionID)
+      toolExecutionGate = undefined
+      expect(yield* Fiber.await(run)).toMatchObject({ _tag: "Failure" })
+
+      requests.length = 0
+      responseStream = undefined
+      responses = [
+        [
+          LLMEvent.stepStart({ index: 0 }),
+          LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+          LLMEvent.finish({ reason: "stop" }),
+        ],
+      ]
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Proceed" }), resume: false })
+      yield* session.resume(sessionID)
+
+      expect(requests).toHaveLength(1)
+      expect(userTexts(requests[0]!)).toEqual(["Interrupt blocked tool", "Proceed"])
+      expect(requests[0]?.messages.map((message) => message.role)).toEqual(["user", "assistant", "tool", "user"])
+    }),
+  )
+
   it.effect("interrupts a blocked provider turn without local tool execution", () =>
     Effect.gen(function* () {
       yield* setup
@@ -3405,6 +3623,115 @@ describe("SessionRunnerLLM", () => {
     )
   }
 
+  it.effect("fails a provider stream that ends without a step settlement", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "End mid-turn" }), resume: false })
+      const fixture = fragmentFixture("text", "text-truncated", ["Partial answer"])
+
+      requests.length = 0
+      responses = undefined
+      streamGate = undefined
+      streamStarted = undefined
+      response = fixture.partialEvents
+
+      yield* session.resume(sessionID)
+
+      // A transport close after partial output is not completion: the step fails
+      // and the content that was already delivered stays visible.
+      const expectedContext = [
+        { type: "user", text: "End mid-turn" },
+        {
+          type: "assistant",
+          finish: "error",
+          error: { type: "unknown", message: "Provider stream ended without a step settlement" },
+          content: [fixture.expectedContent],
+        },
+      ]
+      expect(yield* session.context(sessionID)).toMatchObject(expectedContext)
+
+      yield* replaySessionProjection(sessionID)
+
+      expect(yield* session.context(sessionID)).toMatchObject(expectedContext)
+    }),
+  )
+
+  it.effect("records an interrupted provider turn as a cancelled turn", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const store = yield* SessionStore.Service
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Interrupt the turn" }), resume: false })
+      responseStream = Stream.concat(
+        Stream.fromIterable([
+          LLMEvent.stepStart({ index: 0 }),
+          LLMEvent.textStart({ id: "text-cut" }),
+          LLMEvent.textDelta({ id: "text-cut", text: "Partial answer" }),
+        ]),
+        Stream.never,
+      )
+
+      const run = yield* session.resume(sessionID).pipe(Effect.forkChild)
+      while ((yield* store.turns(sessionID)).length === 0) yield* Effect.yieldNow
+      yield* session.interrupt(sessionID)
+
+      expect(yield* Fiber.await(run)).toMatchObject({ _tag: "Failure" })
+      expect(yield* store.turns(sessionID)).toMatchObject([
+        {
+          state: "cancelled",
+          error: { type: "unknown", message: SessionTurn.INTERRUPTED_REASON },
+          time: { completed: expect.any(Number) },
+        },
+      ])
+
+      // The cancellation is durable: replaying the log cannot reopen or reclassify it.
+      yield* replaySessionProjection(sessionID)
+
+      expect((yield* store.turns(sessionID)).map((turn) => turn.state)).toEqual(["cancelled"])
+    }),
+  )
+
+  it.effect("fails a turn left without a terminal by a previous process", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const store = yield* SessionStore.Service
+      const events = yield* EventV2.Service
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Recover the orphan" }), resume: false })
+
+      // A previous process started a turn and died before publishing a terminal.
+      const orphan = SessionMessage.ID.make("msg_orphaned_turn")
+      yield* events.publish(SessionEvent.Step.Started, {
+        sessionID,
+        timestamp: yield* DateTime.now,
+        assistantMessageID: orphan,
+        agent: "build",
+        model: { id: ModelV2.ID.make("fake-model"), providerID: ProviderV2.ID.make("fake") },
+      })
+      expect(yield* store.turns(sessionID)).toMatchObject([{ id: orphan, state: "running" }])
+
+      requests.length = 0
+      response = [
+        LLMEvent.stepStart({ index: 0 }),
+        LLMEvent.textStart({ id: "text-after-orphan" }),
+        LLMEvent.textDelta({ id: "text-after-orphan", text: "Recovered" }),
+        LLMEvent.textEnd({ id: "text-after-orphan" }),
+        LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+        LLMEvent.finish({ reason: "stop" }),
+      ]
+      yield* session.resume(sessionID)
+
+      // The orphan is failed before the new turn starts, and recovery never retries the
+      // provider work of the interrupted turn.
+      expect(requests).toHaveLength(1)
+      expect(yield* store.turns(sessionID)).toMatchObject([
+        { id: orphan, state: "failed", error: { type: "unknown", message: SessionTurn.ORPHANED_REASON } },
+        { state: "completed", finish: "stop" },
+      ])
+    }),
+  )
+
   it.effect("rejects duplicate streamed text starts", () =>
     Effect.gen(function* () {
       yield* setup
@@ -3461,6 +3788,216 @@ describe("SessionRunnerLLM", () => {
       expect(yield* session.resume(sessionID).pipe(Effect.catchDefect(Effect.succeed))).toBe(
         "Tool input delta before start: call-1",
       )
+    }),
+  )
+
+  it.effect("retries a transient rate-limit stream failure before any assistant content", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const prompt = "Survive the rate limit"
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: prompt }), resume: false })
+
+      requests.length = 0
+      responses = [turnEvents("text-retry", "Recovered after retry")]
+      transientStreamFailures = 2
+      transientStreamFailure = rateLimit("Rate limit reached on tokens per minute")
+      const retryStatuses = yield* captureStatuses()
+
+      const run = yield* session.resume(sessionID).pipe(Effect.forkChild)
+      yield* advanceRetryClock()
+      yield* Fiber.join(run)
+
+      expect(requests).toHaveLength(3)
+      expect(modelResolveCalls).toBe(3)
+      expect(retryAttempts(retryStatuses)).toEqual([
+        { attempt: 1, message: "Rate limit reached on tokens per minute" },
+        { attempt: 2, message: "Rate limit reached on tokens per minute" },
+      ])
+      const context = yield* session.context(sessionID)
+      expect(context.slice(-2)).toMatchObject([
+        { type: "user", text: prompt },
+        {
+          type: "assistant",
+          finish: "stop",
+          content: [{ type: "text", id: "text-retry", text: "Recovered after retry" }],
+        },
+      ])
+    }),
+  )
+
+  it.effect("defers a pre-content provider error event and retries on its retry hint", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const prompt = "Heed the retry hint"
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: prompt }), resume: false })
+
+      requests.length = 0
+      responses = [
+        [LLMEvent.providerError({ message: TPM_RATE_LIMIT_MESSAGE })],
+        turnEvents("text-hint", "Recovered on hint"),
+      ]
+      const retryStatuses = yield* captureStatuses()
+
+      const run = yield* session.resume(sessionID).pipe(Effect.forkChild)
+      yield* advanceRetryClock()
+      yield* Fiber.join(run)
+
+      expect(requests).toHaveLength(2)
+      expect(retryAttempts(retryStatuses)).toEqual([{ attempt: 1, message: TPM_RATE_LIMIT_MESSAGE }])
+      const context = yield* session.context(sessionID)
+      expect(context.slice(-2)).toMatchObject([
+        { type: "user", text: prompt },
+        {
+          type: "assistant",
+          finish: "stop",
+          content: [{ type: "text", id: "text-hint", text: "Recovered on hint" }],
+        },
+      ])
+    }),
+  )
+
+  it.effect("retries transient model resolution failures before the first provider turn", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const prompt = "Resolve after retry"
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: prompt }), resume: false })
+
+      requests.length = 0
+      responses = [turnEvents("text-model-retry", "Resolved after retry")]
+      modelFailures = 2
+      const retryStatuses = yield* captureStatuses()
+
+      const run = yield* session.resume(sessionID).pipe(Effect.forkChild)
+      yield* advanceRetryClock()
+      yield* Fiber.join(run)
+
+      expect(requests).toHaveLength(1)
+      expect(modelResolveCalls).toBe(3)
+      expect(retryAttempts(retryStatuses)).toEqual([
+        { attempt: 1, message: "Model unavailable: fake/fake-model" },
+        { attempt: 2, message: "Model unavailable: fake/fake-model" },
+      ])
+      const context = yield* session.context(sessionID)
+      expect(context.slice(-2)).toMatchObject([
+        { type: "user", text: prompt },
+        {
+          type: "assistant",
+          finish: "stop",
+          content: [{ type: "text", id: "text-model-retry", text: "Resolved after retry" }],
+        },
+      ])
+    }),
+  )
+
+  it.effect("exhausts retries then settles a final attempt and leaves the session drainable", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const prompt = "Retry to exhaustion"
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: prompt }), resume: false })
+
+      requests.length = 0
+      const failure = rateLimit("Rate limit reached on tokens per minute")
+      streamFailure = failure
+      const retryStatuses = yield* captureStatuses()
+
+      const run = yield* session.resume(sessionID).pipe(Effect.forkChild)
+      yield* advanceRetryClock()
+      expect(yield* Fiber.join(run).pipe(Effect.flip)).toBe(failure)
+      expect(requests).toHaveLength(TurnRetry.MAX_RETRIES + 1)
+      expect(retryAttempts(retryStatuses)).toEqual(
+        Array.from({ length: TurnRetry.MAX_RETRIES }, (_, index) => ({
+          attempt: index + 1,
+          message: "Rate limit reached on tokens per minute",
+        })),
+      )
+      const context = yield* session.context(sessionID)
+      expect(context.slice(-2)).toMatchObject([
+        { type: "user", text: prompt },
+        { type: "assistant", finish: "error", error: { message: "Rate limit reached on tokens per minute" } },
+      ])
+
+      // The session must not stay wedged after the bounded retries: once the outage
+      // clears, a later prompt starts a fresh drain and succeeds normally.
+      streamFailure = undefined
+      responses = [turnEvents("text-after-exhaustion", "Recovered after outage")]
+      const recoveryPrompt = "Continue after the outage"
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: recoveryPrompt }), resume: false })
+      yield* session.resume(sessionID)
+      expect(requests).toHaveLength(TurnRetry.MAX_RETRIES + 2)
+      const recovered = yield* session.context(sessionID)
+      expect(recovered.slice(-2)).toMatchObject([
+        { type: "user", text: recoveryPrompt },
+        {
+          type: "assistant",
+          finish: "stop",
+          content: [{ type: "text", id: "text-after-exhaustion", text: "Recovered after outage" }],
+        },
+      ])
+    }),
+  )
+
+  it.effect("quarantines a repeated provider failure instead of retrying it again", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      const events = yield* EventV2.Service
+      const store = yield* SessionStore.Service
+      const prompt = "Retry a poisoned turn"
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: prompt }), resume: false })
+      yield* SessionInput.promoteSteers((yield* Database.Service).db, events, sessionID, Number.MAX_SAFE_INTEGER)
+
+      // Three identical failures are already durable for this input: earlier drains, or a
+      // previous process, repeated the same failing call.
+      const message = "Rate limit reached on tokens per minute"
+      for (let index = 0; index < SessionFailure.MAX_IDENTICAL_FAILURES; index++) {
+        const assistantMessageID = SessionMessage.ID.make(`msg_poison_${index}`)
+        yield* events.publish(SessionEvent.Step.Started, {
+          sessionID,
+          assistantMessageID,
+          timestamp: yield* DateTime.now,
+          agent: "build",
+          model: { id: ModelV2.ID.make("fake-model"), providerID: ProviderV2.ID.make("fake") },
+        })
+        yield* events.publish(SessionEvent.Step.Failed, {
+          sessionID,
+          timestamp: yield* DateTime.now,
+          assistantMessageID,
+          error: { type: "unknown", message },
+        })
+      }
+      expect(yield* store.failures(sessionID)).toMatchObject({
+        failures: SessionFailure.MAX_IDENTICAL_FAILURES,
+        quarantined: true,
+      })
+
+      requests.length = 0
+      const failure = rateLimit(message)
+      streamFailure = failure
+      const retryStatuses = yield* captureStatuses()
+      const run = yield* session.resume(sessionID).pipe(Effect.forkChild)
+      yield* advanceRetryClock()
+      expect(yield* Fiber.join(run).pipe(Effect.flip)).toBe(failure)
+
+      // Poisoned: the provider is attempted once and the failure settles without retries,
+      // so the durable budget cannot be spent again on the same input.
+      expect(requests).toHaveLength(1)
+      expect(retryAttempts(retryStatuses)).toEqual([])
+      expect(yield* store.failures(sessionID)).toMatchObject({ failures: 4, quarantined: true })
+
+      // Admitting a new input is the clear path: accounting is scoped to the prompt that
+      // failed, so the new prompt becomes the input boundary once it is promoted.
+      streamFailure = undefined
+      yield* session.prompt({
+        sessionID,
+        prompt: Prompt.make({ text: "Continue after the outage" }),
+        resume: false,
+      })
+      yield* SessionInput.promoteSteers((yield* Database.Service).db, events, sessionID, Number.MAX_SAFE_INTEGER)
+      expect(yield* store.failures(sessionID)).toMatchObject({ failures: 0, quarantined: false })
     }),
   )
 })

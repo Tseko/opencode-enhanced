@@ -159,6 +159,44 @@
     max-width: 100%;
   }
 
+  [data-slot="user-message-text"]:not([data-expanded]) {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 4;
+    line-clamp: 4;
+  }
+
+  [data-slot="user-message-expand"] {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-top: 6px;
+    padding: 1px 2px;
+    border: none;
+    background: none;
+    cursor: pointer;
+    color: var(--text-weak);
+    font-family: inherit;
+    font-size: 12px;
+    line-height: var(--line-height-large);
+    font-weight: var(--font-weight-medium);
+
+    [data-component="icon"] {
+      width: 12px;
+      height: 12px;
+      color: inherit;
+      transition: transform 0.15s ease;
+    }
+
+    &[aria-expanded="true"] [data-component="icon"] {
+      transform: rotate(180deg);
+    }
+
+    &:hover {
+      color: var(--text-strong);
+    }
+  }
+
   [data-slot="user-message-copy-wrapper"] {
     min-height: 24px;
     margin-top: 4px;
@@ -218,6 +256,12 @@
   .font-medium {
     font-weight: var(--font-weight-medium);
   }
+}
+
+/* The pinned overlay mirrors the question text only; attachments can be
+   arbitrarily large and would cover the response below. */
+[data-component="user-message-pin"] [data-slot="user-message-attachments"] {
+  display: none;
 }
 
 [data-component="text-part"] {
@@ -630,7 +674,7 @@
   }
 }
 
-[data-component="context-tool-group-trigger"] {
+[data-component="tool-group-trigger"] {
   width: 100%;
   min-height: 24px;
   display: flex;
@@ -639,9 +683,13 @@
   gap: 0px;
   cursor: default;
 
-  [data-slot="context-tool-group-title"] {
+  [data-slot="tool-group-title"] {
     flex-shrink: 1;
     min-width: 0;
+  }
+
+  [data-slot="tool-group-error"] {
+    color: var(--v2-state-fg-danger);
   }
 
   [data-slot="collapsible-arrow"] {
@@ -650,16 +698,25 @@
   }
 }
 
-[data-component="context-tool-group-list"] {
-  padding-top: 0;
-  padding-right: 0;
-  padding-bottom: 0;
-  padding-left: 12px;
+:dir(rtl)[data-component="collapsible"][data-kind]
+  > [data-slot="collapsible-trigger"]:not([aria-expanded="true"])
+  [data-slot="collapsible-arrow-icon"] {
+  transform: translateZ(0) rotate(90deg);
+}
+
+[data-component="tool-group-list"] {
+  padding-block: 0;
+  padding-inline-start: 12px;
+  padding-inline-end: 0;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 8px;
 
-  [data-slot="context-tool-group-item"] {
+  &[data-kind="context"] {
+    gap: 4px;
+  }
+
+  [data-slot="tool-group-item"] {
     min-width: 0;
     padding: 0;
   }

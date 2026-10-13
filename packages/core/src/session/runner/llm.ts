@@ -8,7 +8,9 @@ import {
   isContextOverflowFailure,
   type ProviderErrorEvent,
 } from "@opencode-ai/llm"
-import { Cause, DateTime, Effect, FiberSet, Layer, Option, Semaphore, Stream } from "effect"
+import { SessionStatusEvent } from "@opencode-ai/schema/session-status-event"
+import { Cause, Clock, DateTime, Duration, Effect, FiberSet, Layer, Option, Semaphore, Stream } from "effect"
+import { eq } from "drizzle-orm"
 import { AgentV2 } from "../../agent"
 import { Config } from "../../config"
 import { Database } from "../../database/database"
@@ -25,16 +27,27 @@ import { ReferenceGuidance } from "../../reference/guidance"
 import { ToolRegistry } from "../../tool/registry"
 import { ToolOutputStore } from "../../tool-output-store"
 import { InstructionRule } from "../../instruction-rule"
+import { AbsolutePath } from "../../schema"
+import { SessionV1 } from "../../v1/session"
+import { WorkspaceV2 } from "../../workspace"
 import { SessionContextEpoch } from "../context-epoch"
 import { SessionCompaction } from "../compaction"
 import { SessionEvent } from "../event"
 import { SessionHistory } from "../history"
 import { SessionInstructionSignals } from "../instruction-signals"
 import { SessionInput } from "../input"
+import { SessionInvocation } from "../invocation"
+import { toV1 } from "../info"
 import { SessionSchema } from "../schema"
+import { SessionMessageTable, SessionTable } from "../sql"
 import { SessionStore } from "../store"
+import { SessionTitle } from "../title"
+import { SessionUsage } from "../usage"
+import { SessionTurn } from "../turn"
 import { type RunError, Service } from "./index"
 import { SessionRunnerModel } from "./model"
+import { TurnRetry } from "./retry"
+import { SessionFailure } from "../failure"
 import { createLLMEventPublisher } from "./publish-llm-event"
 import { toLLMMessages } from "./to-llm-message"
 import { MAX_STEPS_PROMPT } from "./max-steps"
@@ -52,9 +65,12 @@ import { llmClient } from "../../effect/app-node-platform"
  *   - [x] Coordinate one local active drain per Session; explicit resumes join and prompt wakeups coalesce.
  *   - [ ] Replace local ownership with durable multi-node ownership when clustered.
  *   - [ ] Mark busy, retrying, idle, interrupted, or terminal-failure status durably.
- *   - [ ] Honor interruption and reject stale work after runtime attachment replacement.
+ *   - [x] Honor interruption: fail unsettled tools and the assistant, then exit
+ *     without waiting for in-flight tool fibers.
  *   - [x] Honor optional agent step limits.
- *   - [ ] Bound provider retries and repeated identical tool calls.
+ *   - [x] Bound provider retries: transient failures before assistant content are
+ *     retried with backoff (rate limits, overload, transport, model resolution).
+ *   - [ ] Bound repeated identical tool calls.
  *
  * - Runtime context assembly
  *   - Track V1 runtime-context parity canonically in `specs/v2/session.md`.
@@ -82,7 +98,8 @@ import { llmClient } from "../../effect/app-node-platform"
  * - Post-run maintenance
  *   - [ ] Settle final status and expose durable output events to replayable consumers.
  *   - [ ] Coalesce streamed deltas and add covering projected-history indexes.
- *   - [ ] Update title, summaries, compaction state, and cleanup in bounded background work.
+ *   - [x] Name new conversations from their first prompt via the title agent while the first drain runs.
+ *   - [ ] Update summaries, compaction state, and cleanup in bounded background work.
  *
  * Use `llm.stream(request)` for each provider turn. Keep tool execution and continuation here.
  * Durable continuation recovery remains a separate future slice with an explicit retry policy.
@@ -130,7 +147,7 @@ const layer = Layer.effect(
             timestamp: yield* DateTime.now,
             assistantMessageID: message.id,
             callID: tool.id,
-            error: { type: "unknown", message: "Tool execution interrupted" },
+            error: { type: "unknown", message: SessionInvocation.INTERRUPTED_REASON },
             provider: {
               executed: tool.provider?.executed === true,
               ...(tool.provider?.metadata === undefined ? {} : { metadata: tool.provider.metadata }),
@@ -138,6 +155,105 @@ const layer = Layer.effect(
           })
         }
       }
+    })
+
+    // A turn left without a terminal by a previous process is orphaned: this drain can
+    // never resume it, so it is durably failed. Recovery never re-executes provider work
+    // (see the post-crash continuation rule), which is why an orphan becomes a terminal
+    // failure instead of a retry. Callers pass the turns to fail: a turn that still owns
+    // unsettled tools is continued inline first, and only failed once the drain has
+    // consumed its history, because a failed assistant turn replays without the
+    // provider-native continuation metadata its tool calls need (`runner/to-llm-message`).
+    const failOrphanedTurns = Effect.fn("SessionRunner.failOrphanedTurns")(function* (
+      sessionID: SessionSchema.ID,
+      turns: ReadonlyArray<SessionTurn.Turn>,
+    ) {
+      for (const turn of turns) {
+        yield* events.publish(SessionEvent.Step.Failed, {
+          sessionID,
+          timestamp: yield* DateTime.now,
+          assistantMessageID: turn.id,
+          error: { type: "unknown", message: SessionTurn.ORPHANED_REASON },
+        })
+      }
+    })
+
+    // A conversation can still be named from its first prompt only while it is new: it must
+    // not be a fork, its title must still be the synchronous admission placeholder (or the
+    // default when the prompt produced no placeholder), and no message may be projected yet
+    // (older placeholder sessions keep their titles).
+    const canNameFromFirstPrompt = Effect.fn("SessionRunner.canNameFromFirstPrompt")(function* (
+      sessionID: SessionSchema.ID,
+    ) {
+      const row = yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)
+      if (!row || row.parent_id) return false
+      const first = (yield* SessionInput.list(db, sessionID))[0]
+      if (!first) return false
+      const placeholder = SessionTitle.fromPrompt(first.prompt.text)
+      if (!SessionTitle.isDefault(row.title) && row.title !== placeholder) return false
+      const projected = yield* db
+        .select({ id: SessionMessageTable.id })
+        .from(SessionMessageTable)
+        .where(eq(SessionMessageTable.session_id, sessionID))
+        .limit(1)
+        .get()
+        .pipe(Effect.orDie)
+      return !projected
+    })
+
+    // Generates the session name from the first prompt while the first drain answers, the
+    // Cursor-style naming. Runs detached so the drain never waits for it, and only replaces
+    // the title when the user has not renamed the session in the meantime.
+    const ensureTitle = Effect.fn("SessionRunner.ensureTitle")(function* (sessionID: SessionSchema.ID) {
+      const session = yield* store.get(sessionID)
+      if (!session || session.parentID) return
+      const titleAgent = yield* agents.select(AgentV2.ID.make("title"))
+      if (!titleAgent.info?.system) return
+      const first = (yield* SessionInput.list(db, sessionID))[0]
+      if (!first) return
+      const { model } = yield* models.resolve(
+        titleAgent.info.model ? { ...session, model: titleAgent.info.model } : session,
+      )
+      const chunks: string[] = []
+      const streamed = yield* llm
+        .stream(
+          LLM.request({
+            model,
+            system: [SystemPart.make(titleAgent.info.system)],
+            messages: [Message.user(`Generate a title for this conversation:\n\n${first.prompt.text}`)],
+            tools: [],
+          }),
+        )
+        .pipe(
+          Stream.runForEach((event) => {
+            if (LLMEvent.is.textDelta(event)) chunks.push(event.text)
+            return Effect.void
+          }),
+          Effect.as(true),
+          Effect.catchTag("LLM.Error", () => Effect.succeed(false)),
+        )
+      if (!streamed) return
+      const title = SessionTitle.clean(chunks.join(""))
+      if (!title) return
+      // Re-read so the full-row Updated snapshot does not clobber concurrent changes and the
+      // user's rename (or another title) wins over the generated one.
+      const current = yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)
+      if (!current || current.parent_id) return
+      const placeholder = SessionTitle.fromPrompt(first.prompt.text)
+      if (!SessionTitle.isDefault(current.title) && current.title !== placeholder) return
+      yield* events.publish(
+        SessionV1.Event.Updated,
+        {
+          sessionID,
+          info: toV1({ ...current, title, time_updated: DateTime.toEpochMillis(yield* DateTime.now) }),
+        },
+        {
+          location: Location.Ref.make({
+            directory: AbsolutePath.make(current.directory),
+            workspaceID: current.workspace_id ? WorkspaceV2.ID.make(current.workspace_id) : undefined,
+          }),
+        },
+      )
     })
 
     const awaitToolFibers = (fibers: FiberSet.FiberSet<void, ToolOutputStore.Error>) =>
@@ -201,7 +317,6 @@ const layer = Layer.effect(
         return yield* Effect.interrupt
       const agent = yield* agents.select(session.agent)
       const initialized = yield* SessionContextEpoch.initialize(db, loadSystemContext(agent, session.id), session.id)
-      const toolFibers = yield* FiberSet.make<void, ToolOutputStore.Error>()
       let needsContinuation = false
       let currentStep = step
       if (promotion) {
@@ -216,11 +331,30 @@ const layer = Layer.effect(
       }
       const system =
         initialized ?? (yield* SessionContextEpoch.prepare(db, events, loadSystemContext(agent, session.id), session.id))
-      const model = yield* models.resolve(session)
-      const entries = yield* SessionHistory.entriesForRunner(db, session.id, system.baselineSeq)
+
+      // One provider-turn attempt. Only failures that arrive before any assistant
+      // content is published are retried by the loop below; nothing durable exists
+      // to roll back in that case. `settle` restores the original failure handling
+      // once retries are exhausted.
+      const runAttempt = (settle: boolean) =>
+        Effect.gen(function* () {
+          const toolFibers = yield* FiberSet.make<void, ToolOutputStore.Error>()
+          const { info, model } = yield* models.resolve(session).pipe(
+            Effect.mapError((error) => {
+              const retry = !settle ? TurnRetry.retryable(error) : undefined
+              return retry ? new TurnRetry.RetryableTurnError(retry) : error
+            }),
+          )
+      const entries = compaction.prune(yield* SessionHistory.entriesForRunner(db, session.id, system.baselineSeq))
       const context = entries.map((entry) => entry.message)
       const isLastStep = agent.info?.steps !== undefined && currentStep >= agent.info.steps
       const toolMaterialization = isLastStep ? undefined : yield* tools.materialize(agent.info?.permissions)
+      if (toolMaterialization)
+        yield* Effect.logDebug("materialized tools", {
+          registryEpoch: toolMaterialization.epoch,
+          registryHash: toolMaterialization.hash,
+          definitions: toolMaterialization.definitions.length,
+        })
       const promptCacheKey = /^ses_[0-9a-f]{64}$/.test(session.id) ? session.id.slice(4) : session.id
       const request = LLM.request({
         model,
@@ -235,7 +369,10 @@ const layer = Layer.effect(
         system: [agent.info?.system, system.baseline]
           .filter((part): part is string => part !== undefined && part.length > 0)
           .map(SystemPart.make),
-        messages: [...toLLMMessages(context, model), ...(isLastStep ? [Message.assistant(MAX_STEPS_PROMPT)] : [])],
+        messages: [
+          ...toLLMMessages(context, model, info.capabilities.input),
+          ...(isLastStep ? [Message.assistant(MAX_STEPS_PROMPT)] : []),
+        ],
         tools: toolMaterialization?.definitions ?? [],
         toolChoice: isLastStep ? "none" : undefined,
       })
@@ -256,6 +393,7 @@ const layer = Layer.effect(
       const publish = (event: LLMEvent, outputPaths: ReadonlyArray<string> = []) =>
         withPublication(publisher.publish(event, outputPaths))
       let overflowFailure: ProviderErrorEvent | undefined
+      let retryableFailure: TurnRetry.RetryInfo | undefined
       const providerStream = llm.stream(request).pipe(
         Stream.runForEach((event) =>
           Effect.gen(function* () {
@@ -263,6 +401,14 @@ const layer = Layer.effect(
             if (LLMEvent.is.providerError(event)) {
               if (isContextOverflowFailure(event) && !publisher.hasAssistantStarted()) {
                 overflowFailure = event
+                return
+              }
+              // Defer transient provider errors that arrive before any assistant content so
+              // the turn can retry instead of immediately failing an empty assistant step.
+              const retry =
+                !settle && !publisher.hasAssistantStarted() ? TurnRetry.providerEvent(event.message) : undefined
+              if (retry) {
+                retryableFailure = retry
                 return
               }
             }
@@ -304,6 +450,13 @@ const layer = Layer.effect(
       return yield* Effect.uninterruptibleMask((restore) =>
         Effect.gen(function* () {
           const stream = yield* restore(providerStream).pipe(Effect.exit)
+          if (stream._tag === "Failure" && Cause.hasInterrupts(stream.cause)) {
+            yield* FiberSet.clear(toolFibers)
+            yield* withPublication(publisher.failUnsettledTools(SessionInvocation.INTERRUPTED_REASON))
+            if (publisher.hasActiveAssistant())
+              yield* withPublication(publisher.failAssistant(SessionTurn.INTERRUPTED_REASON))
+            return yield* Effect.failCause(stream.cause)
+          }
           const failure =
             stream._tag === "Failure" ? Option.getOrUndefined(Cause.findErrorOption(stream.cause)) : undefined
           if (
@@ -314,31 +467,42 @@ const layer = Layer.effect(
           )
             return yield* Effect.die(continueAfterOverflowCompaction(currentStep))
           if (overflowFailure) yield* publish(overflowFailure)
+          if (retryableFailure && !publisher.hasAssistantStarted()) {
+            if (stream._tag === "Success" || !Cause.hasInterrupts(stream.cause))
+              return yield* Effect.fail(new TurnRetry.RetryableTurnError(retryableFailure))
+          }
           const llmFailure = failure instanceof LLMError ? failure : undefined
           if (llmFailure && !publisher.hasProviderError()) {
-            yield* withPublication(publisher.failUnsettledTools("Provider did not return a tool result", true))
+            const retry =
+              !settle &&
+              stream._tag === "Failure" &&
+              !publisher.hasAssistantStarted() &&
+              !Cause.hasInterrupts(stream.cause)
+                ? TurnRetry.retryable(llmFailure)
+                : undefined
+            if (retry) return yield* Effect.fail(new TurnRetry.RetryableTurnError(retry))
+            yield* withPublication(publisher.failUnsettledTools(SessionInvocation.HOSTED_UNRESOLVED_REASON, true))
             yield* withPublication(publisher.failAssistant(llmFailure.reason.message))
           }
-          if (stream._tag === "Failure" && Cause.hasInterrupts(stream.cause)) yield* FiberSet.clear(toolFibers)
           const settled = yield* restore(awaitToolFibers(toolFibers)).pipe(Effect.exit)
           if (settled._tag === "Failure" && isUserDeclined(settled.cause)) {
             yield* FiberSet.clear(toolFibers)
-            yield* withPublication(publisher.failUnsettledTools("Tool execution interrupted"))
+            yield* withPublication(publisher.failUnsettledTools(SessionInvocation.INTERRUPTED_REASON))
             return yield* Effect.interrupt
           }
-          if (
-            (stream._tag === "Failure" && Cause.hasInterrupts(stream.cause)) ||
-            (settled._tag === "Failure" && Cause.hasInterrupts(settled.cause))
-          ) {
+          if (settled._tag === "Failure" && Cause.hasInterrupts(settled.cause)) {
             yield* FiberSet.clear(toolFibers)
-            yield* withPublication(publisher.failUnsettledTools("Tool execution interrupted"))
+            yield* withPublication(publisher.failUnsettledTools(SessionInvocation.INTERRUPTED_REASON))
             if (publisher.hasActiveAssistant())
-              yield* withPublication(publisher.failAssistant("Provider turn interrupted"))
+              yield* withPublication(publisher.failAssistant(SessionTurn.INTERRUPTED_REASON))
+            return yield* Effect.failCause(settled.cause)
           }
           if (settled._tag === "Failure" && !Cause.hasInterrupts(settled.cause)) {
             const failure = Cause.squash(settled.cause)
             const message = failure instanceof Error ? failure.message : String(failure)
-            yield* withPublication(publisher.failUnsettledTools(`Tool execution failed: ${message}`))
+            yield* withPublication(
+              publisher.failUnsettledTools(`${SessionInvocation.EXECUTION_FAILED_PREFIX}${message}`),
+            )
           }
           const stepSettlement = publisher.stepSettlement()
           if (stepSettlement && !publisher.hasProviderError()) {
@@ -355,7 +519,7 @@ const layer = Layer.effect(
                 timestamp: yield* DateTime.now,
                 assistantMessageID: yield* publisher.startAssistant(),
                 finish: stepSettlement.finish,
-                cost: 0,
+                cost: SessionUsage.stepCost(info.cost, stepSettlement.tokens),
                 tokens: stepSettlement.tokens,
                 snapshot: endSnapshot,
                 files,
@@ -363,15 +527,82 @@ const layer = Layer.effect(
             )
           }
           if (publisher.hasProviderError())
-            yield* withPublication(publisher.failUnsettledTools("Tool execution interrupted"))
+            yield* withPublication(publisher.failUnsettledTools(SessionInvocation.INTERRUPTED_REASON))
           if (stream._tag === "Success" && !publisher.hasProviderError())
-            yield* withPublication(publisher.failUnsettledTools("Provider did not return a tool result", true))
+            yield* withPublication(publisher.failUnsettledTools(SessionInvocation.HOSTED_UNRESOLVED_REASON, true))
+          // The LLM client requires a terminal finish before a stream can end
+          // successfully, so a settled step is the only valid completion. If a
+          // producer bypasses that contract, keep the runner honest whenever the
+          // turn already published assistant output: a partially delivered turn
+          // must fail instead of ending as if it had completed.
+          if (
+            stream._tag === "Success" &&
+            !publisher.hasProviderError() &&
+            stepSettlement === undefined &&
+            publisher.hasAssistantStarted()
+          )
+            yield* withPublication(publisher.failAssistant("Provider stream ended without a step settlement"))
           if (stream._tag === "Failure") return yield* Effect.failCause(stream.cause)
-          if (settled._tag === "Failure" && Cause.hasInterrupts(settled.cause))
-            return yield* Effect.failCause(settled.cause)
-          return { needsContinuation: !publisher.hasProviderError() && needsContinuation, step: currentStep }
+          return {
+            // A turn continues only after a settled step; a stream that ended
+            // without one is a failure, never a reason to call the provider again.
+            needsContinuation: stepSettlement !== undefined && !publisher.hasProviderError() && needsContinuation,
+            step: currentStep,
+          }
         }),
       )
+      })
+
+      const runAttempts: (retries: number, limit: number) => Effect.Effect<
+        { readonly needsContinuation: boolean; readonly step: number },
+        RunError
+      > = (retries, limit) =>
+        runAttempt(retries === limit).pipe(
+          Effect.catch((failure) => {
+            if (!(failure instanceof TurnRetry.RetryableTurnError)) return Effect.fail(failure)
+            if (retries >= limit)
+              return Effect.die("Retryable provider failure escaped the settling attempt")
+            const attempt = retries + 1
+            const wait = TurnRetry.delayMs(attempt, failure.retryAfterMs)
+            return Effect.gen(function* () {
+              yield* Effect.logWarning("retrying provider turn", {
+                "session.id": session.id,
+                attempt,
+                "retry.delay_ms": wait,
+                "retry.message": failure.message,
+              })
+              yield* events.publish(
+                SessionStatusEvent.Status,
+                {
+                  sessionID: session.id,
+                  status: {
+                    type: "retry",
+                    attempt,
+                    message: failure.message,
+                    next: (yield* Clock.currentTimeMillis) + wait,
+                  },
+                },
+                { location: session.location },
+              )
+              yield* Effect.sleep(Duration.millis(wait))
+              // The last allowed retry settles directly. Retrying once more only to
+              // persist the same terminal provider failure would issue an unexpected
+              // extra billable request after the retry budget was already exhausted.
+              return yield* runAttempts(attempt, limit)
+            })
+          }),
+        )
+      // Poison accounting: the retry budget shrinks with the durable streak of identical
+      // failures this input already produced, and stops entirely at the quarantine threshold.
+      // The accounting therefore survives drains and restarts, the drain still attempts the
+      // provider once, and admitting a new input is the clear path because the streak is
+      // scoped to one prompt.
+      const prior = SessionFailure.account(yield* getContext(session.id)).failures
+      const quarantined = prior >= SessionFailure.MAX_IDENTICAL_FAILURES
+      if (quarantined)
+        yield* Effect.logWarning("provider failure quarantined", { "session.id": session.id, failures: prior })
+      const limit = quarantined ? 0 : Math.max(0, TurnRetry.MAX_RETRIES - prior)
+      return yield* runAttempts(0, limit)
     }, Effect.scoped)
     type RunTurn = (
       sessionID: SessionSchema.ID,
@@ -414,7 +645,24 @@ const layer = Layer.effect(
       const hasSteer = yield* SessionInput.hasPending(db, input.sessionID, "steer")
       const hasQueue = hasSteer ? false : yield* SessionInput.hasPending(db, input.sessionID, "queue")
       if (!input.force && !hasSteer && !hasQueue) return
+      // Classified before tool reconciliation: a running turn whose tools are still
+      // unsettled is continued inline by this drain (those tools are failed and its
+      // history is replayed for the provider to finish), so only a turn with nothing left
+      // to settle is failed up front.
+      const running = (yield* store.turns(input.sessionID)).filter((turn) => turn.state === "running")
+      const abandoned = running.filter((turn) => turn.unsettledTools === 0)
+      const continued = running.filter((turn) => turn.unsettledTools > 0)
       yield* failInterruptedTools(input.sessionID)
+      yield* failOrphanedTurns(input.sessionID, abandoned)
+      if (yield* canNameFromFirstPrompt(input.sessionID))
+        yield* ensureTitle(input.sessionID).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Failed to generate session title", cause).pipe(
+              Effect.annotateLogs({ sessionID: input.sessionID }),
+            ),
+          ),
+          Effect.forkDetach,
+        )
       let promotion: SessionInput.Delivery | undefined = hasSteer ? "steer" : hasQueue ? "queue" : undefined
       let shouldRun = input.force || hasSteer || hasQueue
       while (shouldRun) {
@@ -430,6 +678,10 @@ const layer = Layer.effect(
         shouldRun = yield* SessionInput.hasPending(db, input.sessionID, "queue")
         promotion = shouldRun ? "queue" : undefined
       }
+      // The continued turns were replayed with their provider-native continuation metadata
+      // while this drain ran, so they are terminalized only now, after every request that
+      // needed that metadata was built.
+      yield* failOrphanedTurns(input.sessionID, continued)
     })
 
     return Service.of({

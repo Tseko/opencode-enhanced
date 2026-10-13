@@ -20,6 +20,8 @@ export const dict = {
   "command.category.permissions": "Berechtigungen",
   "command.category.workspace": "Arbeitsbereich",
   "command.category.settings": "Einstellungen",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "System",
   "theme.scheme.light": "Hell",
   "theme.scheme.dark": "Dunkel",

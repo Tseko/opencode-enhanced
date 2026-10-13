@@ -16,6 +16,7 @@ export const Capabilities = Model.Capabilities
 export type Capabilities = Model.Capabilities
 
 export const Cost = Model.Cost
+export type Cost = Model.Cost
 
 export const Ref = Model.Ref
 export type Ref = typeof Ref.Type

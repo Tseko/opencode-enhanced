@@ -70,6 +70,101 @@ describe("coalesceServerEvents", () => {
     expect(result[0]?.payload.current).toMatchObject({ id: "evt_2", data: { delta: "hello world" } })
   })
 
+  test("merges adjacent session.next text deltas and versioned suffixes", () => {
+    const current = (id: string, value: string, type: string) =>
+      adaptServerEvent({
+        id,
+        created: 1,
+        type,
+        location: { directory: "/repo" },
+        data: { sessionID: "ses", assistantMessageID: "msg", textID: "txt_1", delta: value },
+      } as OpenCodeEvent)
+    const result = coalesceServerEvents([
+      { directory: "/repo", payload: current("evt_1", "hello ", "session.next.text.delta") },
+      { directory: "/repo", payload: current("evt_2", "wor", "session.next.text.delta.1") },
+      { directory: "/repo", payload: current("evt_3", "ld", "session.next.text.delta.2") },
+    ])
+
+    expect(result).toHaveLength(1)
+    expect(result[0]?.payload.current).toMatchObject({ id: "evt_3", data: { delta: "hello world" } })
+  })
+
+  test("keeps distinct next delta streams and non-delta barriers", () => {
+    const text = (id: string, value: string, textID: string) =>
+      adaptServerEvent({
+        id,
+        created: 1,
+        type: "session.next.text.delta",
+        location: { directory: "/repo" },
+        data: { sessionID: "ses", assistantMessageID: "msg", textID, delta: value },
+      } as unknown as OpenCodeEvent)
+    const reasoning = (id: string, value: string) =>
+      adaptServerEvent({
+        id,
+        created: 1,
+        type: "session.next.reasoning.delta",
+        location: { directory: "/repo" },
+        data: { sessionID: "ses", assistantMessageID: "msg", reasoningID: "rsn_1", delta: value },
+      } as unknown as OpenCodeEvent)
+    const status = {
+      directory: "/repo",
+      payload: { type: "session.status", properties: { sessionID: "ses", status: { type: "idle" } } } as Event,
+    }
+    const result = coalesceServerEvents([
+      { directory: "/repo", payload: text("evt_1", "a", "txt_1") },
+      { directory: "/repo", payload: text("evt_2", "b", "txt_1") },
+      { directory: "/repo", payload: reasoning("evt_3", "think") },
+      { directory: "/repo", payload: reasoning("evt_4", "ing") },
+      status,
+      { directory: "/repo", payload: text("evt_5", "c", "txt_2") },
+    ])
+
+    expect(result.map((event) => event.payload.current?.id ?? event.payload.type)).toEqual([
+      "evt_2",
+      "evt_4",
+      "session.status",
+      "evt_5",
+    ])
+    expect(result[0]?.payload.current).toMatchObject({ data: { delta: "ab" } })
+    expect(result[1]?.payload.current).toMatchObject({ data: { delta: "thinking" } })
+  })
+
+  test("merges adjacent session.next tool input deltas", () => {
+    const current = (id: string, value: string) =>
+      adaptServerEvent({
+        id,
+        created: 1,
+        type: "session.next.tool.input.delta",
+        location: { directory: "/repo" },
+        data: { sessionID: "ses", assistantMessageID: "msg", callID: "call_1", delta: value },
+      } as unknown as OpenCodeEvent)
+    const result = coalesceServerEvents([
+      { directory: "/repo", payload: current("evt_1", '{"q"') },
+      { directory: "/repo", payload: current("evt_2", ':1}') },
+    ])
+
+    expect(result).toHaveLength(1)
+    expect(result[0]?.payload.current).toMatchObject({ id: "evt_2", data: { delta: '{"q":1}' } })
+  })
+
+  test("merges adjacent session.next compaction deltas", () => {
+    const current = (id: string, value: string) =>
+      adaptServerEvent({
+        id,
+        created: 1,
+        type: "session.next.compaction.delta",
+        location: { directory: "/repo" },
+        data: { sessionID: "ses", messageID: "msg", text: value },
+      } as unknown as OpenCodeEvent)
+    const result = coalesceServerEvents([
+      { directory: "/repo", payload: current("evt_1", "hello ") },
+      { directory: "/repo", payload: current("evt_2", "world") },
+    ])
+
+    expect(result).toHaveLength(1)
+    expect(result[0]?.payload.current).toMatchObject({ id: "evt_2", data: { text: "hello world" } })
+  })
+
   test("preserves event boundaries and distinct fields", () => {
     const status = {
       directory: "/repo",

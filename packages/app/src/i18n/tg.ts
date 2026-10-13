@@ -110,6 +110,8 @@ export const dict = {
   "command.category.workspace": "Фазои корӣ",
   "command.category.settings": "Танзимотҳо",
   "command.logs.export": "Сабтҳои содиротӣ",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "Система",
   "theme.scheme.light": "Нур",
   "theme.scheme.dark": "Торик",

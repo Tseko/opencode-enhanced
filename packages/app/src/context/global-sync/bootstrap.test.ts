@@ -35,6 +35,7 @@ const api = {
   },
   question: { request: { list: async () => ({ location: {}, data: [] }) } },
   reference: { list: async () => ({ location: {}, data: [] }) },
+  session: { active: async () => ({}) },
   vcs: { get: async () => ({ location: {}, data: {} }) },
 } as unknown as ServerApi
 

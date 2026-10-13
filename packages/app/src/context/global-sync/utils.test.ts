@@ -59,7 +59,7 @@ describe("normalizeAgentList", () => {
         request: { headers: {}, body: {} },
         permissions: [],
       },
-    ] as AgentListOutput["data"])
+    ] as unknown as AgentListOutput["data"])
 
     expect(result).toEqual([
       {

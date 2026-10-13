@@ -8,6 +8,9 @@ import { SessionHistory } from "./history"
 import { MessageDecodeError } from "./error"
 import { SessionMessage } from "./message"
 import { SessionSchema } from "./schema"
+import { SessionFailure } from "./failure"
+import { SessionInvocation } from "./invocation"
+import { SessionTurn } from "./turn"
 import { SessionMessageTable, SessionTable } from "./sql"
 import { fromRow } from "./info"
 
@@ -21,6 +24,14 @@ export interface Interface {
   readonly message: (
     messageID: SessionMessage.ID,
   ) => Effect.Effect<{ readonly sessionID: SessionSchema.ID; readonly message: SessionMessage.Message } | undefined>
+  /** Durable turn state derived from the projected context, oldest turn first. */
+  readonly turns: (sessionID: SessionSchema.ID) => Effect.Effect<ReadonlyArray<SessionTurn.Turn>, MessageDecodeError>
+  /** Durable tool-invocation ledger derived from the same projection, oldest call first. */
+  readonly invocations: (
+    sessionID: SessionSchema.ID,
+  ) => Effect.Effect<ReadonlyArray<SessionInvocation.Invocation>, MessageDecodeError>
+  /** Poison accounting for the current input, derived from the same projection. */
+  readonly failures: (sessionID: SessionSchema.ID) => Effect.Effect<SessionFailure.Account, MessageDecodeError>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/SessionStore") {}
@@ -55,6 +66,15 @@ const layer = Layer.effect(
               message: yield* decodeMessage({ ...row.data, id: row.id, type: row.type }).pipe(Effect.orDie),
             }
           : undefined
+      }),
+      turns: Effect.fn("SessionStore.turns")(function* (sessionID) {
+        return SessionTurn.of(yield* SessionHistory.load(db, sessionID))
+      }),
+      invocations: Effect.fn("SessionStore.invocations")(function* (sessionID) {
+        return SessionInvocation.of(sessionID, yield* SessionHistory.load(db, sessionID))
+      }),
+      failures: Effect.fn("SessionStore.failures")(function* (sessionID) {
+        return SessionFailure.account(yield* SessionHistory.load(db, sessionID))
       }),
     })
   }),

@@ -213,14 +213,8 @@ function userParts(sessionID: string, message: SessionMessageUser): Part[] {
         type: "file",
         mime: file.mime,
         filename: file.name,
-        url: file.source.type === "uri" ? file.source.uri : `data:${file.mime};base64,${file.data}`,
-        source: file.mention
-          ? {
-              type: "file",
-              text: { value: file.mention.text, start: file.mention.start, end: file.mention.end },
-              path: file.mention.text.startsWith("@") ? file.mention.text.slice(1) : (file.name ?? file.mention.text),
-            }
-          : undefined,
+        url: attachmentUrl(file),
+        source: attachmentSource(file),
       }),
     ),
     ...(message.agents ?? []).map(
@@ -230,12 +224,48 @@ function userParts(sessionID: string, message: SessionMessageUser): Part[] {
         messageID: message.id,
         type: "agent",
         name: item.name,
-        source: item.mention
-          ? { value: item.mention.text, start: item.mention.start, end: item.mention.end }
-          : undefined,
+        source: mentionSpan(item),
       }),
     ),
   ]
+}
+
+type PromptAttachment = NonNullable<SessionMessageUser["files"]>[number]
+type PromptAgent = NonNullable<SessionMessageUser["agents"]>[number]
+
+function readRecord(value: unknown) {
+  return record(value) ? value : undefined
+}
+
+// The vendored client snapshot types attachments as inline base64 with a resolved `source`,
+// while current servers send a `uri` and keep the mention span in `source`.
+function attachmentUrl(file: PromptAttachment) {
+  const value = readRecord(file)
+  if (!value) return ""
+  if (typeof value.uri === "string") return value.uri
+  const source = readRecord(value.source)
+  if (source?.type === "uri" && typeof source.uri === "string") return source.uri
+  if (typeof value.data === "string") return `data:${file.mime};base64,${value.data}`
+  return ""
+}
+
+function attachmentSource(file: PromptAttachment): FilePart["source"] {
+  const span = mentionSpan(file)
+  if (!span) return
+  return {
+    type: "file",
+    text: span,
+    path: span.value.startsWith("@") ? span.value.slice(1) : (file.name ?? span.value),
+  }
+}
+
+function mentionSpan(input: PromptAttachment | PromptAgent) {
+  const value = readRecord(input)
+  if (!value) return
+  const mention = readRecord(value.mention) ?? readRecord(value.source)
+  if (!mention) return
+  if (typeof mention.text !== "string" || typeof mention.start !== "number" || typeof mention.end !== "number") return
+  return { value: mention.text, start: mention.start, end: mention.end }
 }
 
 function assistantMessage(sessionID: string, parentID: string, message: SessionMessageAssistant): AssistantMessage {

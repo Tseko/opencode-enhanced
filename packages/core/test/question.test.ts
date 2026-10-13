@@ -89,6 +89,19 @@ describe("QuestionV2", () => {
     }),
   )
 
+  it.effect("rejects every pending prompt for a session on interrupt", () =>
+    Effect.gen(function* () {
+      const service = yield* QuestionV2.Service
+      const { fiber, request } = yield* waitForAsk(service, { sessionID, questions: [question] })
+      yield* service.interrupt(sessionID)
+      const exit = yield* Fiber.await(fiber)
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) expect(exit.cause.toString()).toContain("QuestionV2.RejectedError")
+      expect(yield* service.list()).toEqual([])
+      expect(request.sessionID).toBe(sessionID)
+    }),
+  )
+
   it.effect("isolates pending requests by location-layer instance and rejects them on finalization", () =>
     Effect.gen(function* () {
       const firstScope = yield* Scope.make()

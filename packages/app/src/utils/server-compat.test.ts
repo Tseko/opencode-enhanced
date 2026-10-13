@@ -24,6 +24,12 @@ function setup(
       }
       if (request.method === "POST" && request.url.endsWith("/prompt_async"))
         return new Response(undefined, { status: 204 })
+      if (request.method === "POST" && /\/api\/session\/[^/]+\/compact$/.test(new URL(request.url).pathname))
+        return Response.json({
+          data: { admittedSeq: 1, id: "compact_1", sessionID: "ses_1", timeCreated: 1, type: "compaction" },
+        })
+      if (request.method === "POST" && /\/api\/session\/[^/]+\/revert\/stage$/.test(new URL(request.url).pathname))
+        return Response.json({ data: { messageID: "msg_1", files: [] } })
       if (request.method === "POST" && request.url.endsWith("/prompt")) {
         return Response.json({
           admittedSeq: 1,
@@ -276,11 +282,12 @@ describe("createCompatibleApi", () => {
 
     expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
       "/auth/openrouter",
+      "/api/integration/openrouter/connect/key",
       "/instance/dispose",
       "/instance/dispose",
     ])
-    expect(requests[1]!.headers.get("x-opencode-directory")).toBe("%2Frepo")
-    expect(requests[2]!.headers.get("x-opencode-directory")).toBeNull()
+    expect(requests[2]!.headers.get("x-opencode-directory")).toBe("%2Frepo")
+    expect(requests[3]!.headers.get("x-opencode-directory")).toBeNull()
   })
 
   test("disposes the V1 instance after completing provider OAuth", async () => {

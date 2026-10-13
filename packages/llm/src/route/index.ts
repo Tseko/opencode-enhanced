@@ -1,4 +1,5 @@
 export { Route, LLMClient } from "./client"
+export { ProviderAdmission } from "./admission"
 export type {
   Route as RouteShape,
   RouteModelInput,

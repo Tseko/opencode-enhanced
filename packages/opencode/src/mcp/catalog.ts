@@ -36,7 +36,17 @@ export async function paginate<T, R extends { nextCursor?: string }>(
 }
 
 export function defs(client: Client, timeout?: number) {
-  return listTools(client, timeout ?? DEFAULT_TIMEOUT).pipe(Effect.catch(() => Effect.void))
+  return listTools(client, timeout ?? DEFAULT_TIMEOUT).pipe(
+    // `defs` deliberately degrades to `void` so callers can distinguish "listing failed"
+    // from "server legitimately exposes no tools". Keep the reason in the log so a
+    // connected server that exposes no tools is always diagnosable.
+    Effect.tapError((error) =>
+      Effect.logWarning("failed to list MCP tools", {
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    ),
+    Effect.catch(() => Effect.void),
+  )
 }
 
 export function convertTool(mcpTool: MCPToolDef, client: Client, timeout?: number): Tool {

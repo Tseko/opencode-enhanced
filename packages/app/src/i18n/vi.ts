@@ -116,6 +116,8 @@ export const dict = {
   "command.category.workspace": "Không gian làm việc",
   "command.category.settings": "Cài đặt",
   "command.logs.export": "Xuất nhật ký",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "Hệ thống",
   "theme.scheme.light": "Sáng",
   "theme.scheme.dark": "Tối",

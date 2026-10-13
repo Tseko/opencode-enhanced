@@ -115,6 +115,8 @@ export const dict = {
   "command.category.workspace": "ورک سپیس",
   "command.category.settings": "ترتیبات",
   "command.logs.export": "لاگ برآمد کرو",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "نظام",
   "theme.scheme.light": "ہلکا",
   "theme.scheme.dark": "گہرا",

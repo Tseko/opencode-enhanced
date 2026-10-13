@@ -111,6 +111,8 @@ export const dict = {
   "command.category.workspace": "Աշխատանքային տարածք",
   "command.category.settings": "Կարգավորումներ",
   "command.logs.export": "Արտահանել տեղեկամատյանները",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "Համակարգ",
   "theme.scheme.light": "Բաց",
   "theme.scheme.dark": "Մուգ",

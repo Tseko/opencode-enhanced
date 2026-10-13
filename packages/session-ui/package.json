@@ -27,9 +27,10 @@
   },
   "scripts": {
     "typecheck": "tsgo --noEmit",
-    "test": "bun test src --only-failures"
+    "test": "bun test src --conditions=solid --only-failures"
   },
   "devDependencies": {
+    "@happy-dom/global-registrator": "20.12.0",
     "@tsconfig/node22": "catalog:",
     "@types/bun": "catalog:",
     "@types/luxon": "catalog:",

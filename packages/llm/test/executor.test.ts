@@ -400,25 +400,16 @@ describe("RequestExecutor", () => {
         expect(yield* Ref.get(attempts)).toBe(1)
 
         yield* TestClock.adjust(1)
-        yield* Effect.yieldNow
-        expect(yield* Ref.get(attempts)).toBe(2)
-
-        yield* TestClock.adjust(999)
-        yield* Effect.yieldNow
-        expect(yield* Ref.get(attempts)).toBe(2)
-
-        yield* TestClock.adjust(1)
         const error = yield* Fiber.join(fiber)
 
         expectLLMError(error)
         expect(error.reason).toMatchObject({ _tag: "ProviderInternal" })
-        expect(yield* Ref.get(attempts)).toBe(3)
+        expect(yield* Ref.get(attempts)).toBe(2)
       }).pipe(
         Effect.provide(
           countedResponsesLayer(attempts, [
             new Response("busy", { status: 503 }),
             new Response("still busy", { status: 503 }),
-            new Response("done retrying", { status: 503 }),
           ]),
         ),
       )

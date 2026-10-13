@@ -109,6 +109,8 @@ export const dict = {
   "command.category.workspace": "ພື້ນທີ່ເຮັດວຽກ",
   "command.category.settings": "ການຕັ້ງຄ່າ",
   "command.logs.export": "ບັນທຶກການສົ່ງອອກ",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "ລະບົບ",
   "theme.scheme.light": "ແສງສະຫວ່າງ",
   "theme.scheme.dark": "ມືດ",

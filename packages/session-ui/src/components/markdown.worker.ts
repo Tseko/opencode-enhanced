@@ -1,5 +1,10 @@
 /// <reference lib="webworker" />
 
+// Vite replaces this module with a URL string for `?worker&url` imports at build
+// time. Bun's test runtime has no such transform and loads the file directly, so
+// provide a default export to satisfy the default-import link.
+export default null
+
 import { ShikiStreamTokenizer } from "@shikijs/stream"
 import { createMarkdownParser } from "@opencode-ai/ui/context/marked-parser"
 import { OpenCodeTheme } from "@opencode-ai/ui/context/marked-theme"

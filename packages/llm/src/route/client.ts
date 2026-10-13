@@ -1,4 +1,4 @@
-import { Cause, Context, Effect, Layer, Schema, Stream } from "effect"
+import { Cause, Clock, Context, Duration, Effect, Layer, Schema, Stream } from "effect"
 import * as Option from "effect/Option"
 import { Auth, type Auth as AuthDef } from "./auth"
 import { Endpoint, type EndpointPatch } from "./endpoint"
@@ -8,12 +8,14 @@ import { HttpTransport } from "./transport"
 import type { Transport, TransportRuntime } from "./transport"
 import { WebSocketExecutor } from "./transport"
 import type { Protocol } from "./protocol"
+import { resolveTimeouts, type Resolved, type Timeouts } from "./timeouts"
 import { applyCachePolicy } from "../cache-policy"
 import * as ProviderShared from "../protocols/shared"
-import type { LLMError, LLMEvent, PreparedRequestOf, ProtocolID, ProviderOptions } from "../schema"
+import type { LLMError, PreparedRequestOf, ProtocolID, ProviderOptions } from "../schema"
 import {
   GenerationOptions,
   HttpOptions,
+  LLMEvent,
   LLMRequest,
   LLMResponse,
   Model,
@@ -70,6 +72,7 @@ export interface RouteDefaults {
   readonly generation?: GenerationOptions
   readonly providerOptions?: ProviderOptions
   readonly http?: HttpOptions
+  readonly timeouts?: Timeouts
 }
 
 export interface RouteDefaultsInput {
@@ -78,6 +81,7 @@ export interface RouteDefaultsInput {
   readonly generation?: GenerationOptions.Input
   readonly providerOptions?: ProviderOptions
   readonly http?: HttpOptions.Input
+  readonly timeouts?: Timeouts
 }
 
 export interface RoutePatch<Body, Prepared> extends RouteDefaultsInput {
@@ -371,11 +375,64 @@ const prepareWith = Effect.fn("LLMClient.prepare")(function* (request: LLMReques
   })
 })
 
+/**
+ * A provider response is complete only when the protocol reported a terminal
+ * finish or a provider error. A transport close on its own is a truncated
+ * response, not completion, so a normally-ended stream without a terminal
+ * fails here instead of looking like a successful turn. The same wrapper
+ * enforces semantic idle and total deadlines; keepalive traffic that never
+ * decodes into an event cannot hold the stream open.
+ */
+const enforceStreamContract = (events: Stream.Stream<LLMEvent, LLMError>, route: string, timeouts: Resolved) =>
+  Stream.unwrap(
+    Effect.gen(function* () {
+      const startedAt = yield* Clock.currentTimeMillis
+      let terminal = false
+      return events.pipe(
+        Stream.tap((event) =>
+          Effect.sync(() => {
+            if (LLMEvent.is.finish(event) || LLMEvent.is.providerError(event)) terminal = true
+          }),
+        ),
+        Stream.timeoutOrElse({
+          duration: Duration.millis(timeouts.idleMs),
+          orElse: () =>
+            Stream.fromEffect(
+              ProviderShared.eventError(route, `Provider stream idle for more than ${timeouts.idleMs}ms`),
+            ).pipe(Stream.drain),
+        }),
+        Stream.mapEffect((event) =>
+          Effect.gen(function* () {
+            if ((yield* Clock.currentTimeMillis) - startedAt > timeouts.totalMs)
+              return yield* ProviderShared.eventError(
+                route,
+                `Provider stream exceeded its total deadline of ${timeouts.totalMs}ms`,
+              )
+            return event
+          }),
+        ),
+        Stream.concat(
+          Stream.fromEffect(
+            Effect.suspend(() =>
+              terminal
+                ? Effect.void
+                : ProviderShared.eventError(route, "Provider stream ended without a terminal finish event"),
+            ),
+          ).pipe(Stream.drain),
+        ),
+      )
+    }),
+  )
+
 const streamRequestWith = (runtime: TransportRuntime) => (request: LLMRequest) =>
   Stream.unwrap(
     Effect.gen(function* () {
       const compiled = yield* compile(request)
-      return compiled.route.streamPrepared(compiled.prepared, compiled.request, runtime)
+      return enforceStreamContract(
+        compiled.route.streamPrepared(compiled.prepared, compiled.request, runtime),
+        `${compiled.request.model.provider}/${compiled.route.id}`,
+        resolveTimeouts(compiled.route.defaults.timeouts),
+      )
     }),
   )
 

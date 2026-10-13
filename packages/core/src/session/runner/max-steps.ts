@@ -1,3 +1,13 @@
+/**
+ * Terminal reason written to an assistant message when a turn stops because the agent's step
+ * allowance was exhausted. Consumers must surface it distinctly (the task tool reports
+ * `reason: turn_limit`) instead of collapsing the turn into success.
+ *
+ * It travels as an `UnknownError` message because the durable V1 message error union has no
+ * dedicated step-limit variant, and adding one would change the shared message schema.
+ */
+export const TURN_LIMIT_REASON = "Maximum agent steps reached"
+
 export const MAX_STEPS_PROMPT = `CRITICAL - MAXIMUM STEPS REACHED
 
 The maximum number of steps allowed for this task has been reached. Tools are disabled until next user input. Respond with text only.

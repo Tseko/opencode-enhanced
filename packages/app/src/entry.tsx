@@ -150,31 +150,31 @@ if (import.meta.env.VITE_SENTRY_DSN) {
 }
 
 if (root instanceof HTMLElement) {
-  void loadInitialLocale().then((locale) => {
-    const auth = authFromToken(new URLSearchParams(location.search).get("auth_token"))
-    clearAuthToken()
-    const server: ServerConnection.Http = {
-      type: "http",
-      authToken: !!auth,
-      http: {
-        url: getCurrentUrl(),
-        ...auth,
-      },
-    }
-    render(
-      () => (
-        <PlatformProvider value={platform}>
-          <AppBaseProviders locale={locale}>
-            <AppInterface
-              defaultServer={ServerConnection.Key.make(getDefaultUrl())}
-              canonicalLocalServer={ServerConnection.key(server)}
-              servers={[server]}
-              disableHealthCheck
-            />
-          </AppBaseProviders>
-        </PlatformProvider>
-      ),
-      root,
-    )
-  })
+  const initialLocale = loadInitialLocale()
+  const auth = authFromToken(new URLSearchParams(location.search).get("auth_token"))
+  clearAuthToken()
+  const server: ServerConnection.Http = {
+    type: "http",
+    authToken: !!auth,
+    http: {
+      url: getCurrentUrl(),
+      ...auth,
+    },
+  }
+  render(
+    () => (
+      <PlatformProvider value={platform}>
+        <AppBaseProviders>
+          <AppInterface
+            defaultServer={ServerConnection.Key.make(getDefaultUrl())}
+            canonicalLocalServer={ServerConnection.key(server)}
+            servers={[server]}
+            disableHealthCheck
+            startup={initialLocale.then(() => undefined)}
+          />
+        </AppBaseProviders>
+      </PlatformProvider>
+    ),
+    root,
+  )
 }

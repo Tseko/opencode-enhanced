@@ -1,5 +1,6 @@
 import type { NamedError } from "@opencode-ai/core/util/error"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { Retry } from "@opencode-ai/llm"
 import { Cause, Clock, Duration, Effect, Schedule } from "effect"
 import { MessageV2 } from "./message-v2"
 import { iife } from "@/util/iife"
@@ -30,16 +31,6 @@ export const RETRY_MAX_DELAY_NO_HEADERS = 30_000 // 30 seconds
 export const RETRY_MAX_DELAY = 2_147_483_647 // max 32-bit signed integer for setTimeout
 export const RETRY_MAX_RETRIES = 5
 
-const RETRYABLE_MESSAGE_PATTERNS = [
-  /429|500|502|503|504|524/i,
-  /rate increased too quickly|rate limit|rate-limit|rate_limit|too many requests/i,
-  /overloaded|service unavailable|service_unavailable|service-unavailable|internal error|internal_error|internal server error|server error|server_error|server-error|provider returned error|provider_returned_error|provider-returned-error/i,
-  /terminated|fetch failed|failed to fetch|network[-_\s]error|upstream connect|connection error|connection refused|connection lost|socket connection was closed|socket hang up|reset before headers|getaddrinfo|enotfound|eai_again|econnrefused|econnreset|etimedout/i,
-  /^timeout$|\b(?:request|response|connection|network|stream|read) (?:timeout|timed out|time out)\b/i,
-  /try your request again|retry your request|resource exhausted|resource_exhausted/i,
-  /\btry again (?:later|in\b)|\b(?:currently|temporarily) at capacity\b/i,
-]
-
 function cap(ms: number) {
   return Math.min(ms, RETRY_MAX_DELAY)
 }
@@ -51,15 +42,15 @@ export function delay(attempt: number, error?: SessionV1.APIError, random = Math
       const retryAfterMs = headers["retry-after-ms"]
       if (retryAfterMs) {
         const parsedMs = Number.parseFloat(retryAfterMs)
-        if (!Number.isNaN(parsedMs)) {
-          return cap(parsedMs)
+        if (Number.isFinite(parsedMs) && parsedMs >= 0) {
+          return cap(Math.ceil(parsedMs))
         }
       }
 
       const retryAfter = headers["retry-after"]
       if (retryAfter) {
         const parsedSeconds = Number.parseFloat(retryAfter)
-        if (!Number.isNaN(parsedSeconds)) {
+        if (Number.isFinite(parsedSeconds) && parsedSeconds >= 0) {
           // convert seconds to milliseconds
           return cap(Math.ceil(parsedSeconds * 1000))
         }
@@ -69,9 +60,10 @@ export function delay(attempt: number, error?: SessionV1.APIError, random = Math
           return cap(Math.ceil(parsed))
         }
       }
-
-      return cap(exponential(attempt, random))
     }
+
+    const hinted = Retry.retryHintMs(error.data.message) ?? Retry.retryHintMs(error.data.responseBody)
+    if (hinted !== undefined) return cap(hinted)
   }
 
   return cap(Math.min(exponential(attempt, random), RETRY_MAX_DELAY_NO_HEADERS))
@@ -92,8 +84,8 @@ export function retryable(error: Err, provider: string) {
     if (
       !error.data.isRetryable &&
       !(status !== undefined && status >= 500) &&
-      !matchesRetryableMessage(error.data.message) &&
-      !matchesRetryableMessage(error.data.responseBody)
+      !Retry.matchesTransient(error.data.message) &&
+      !Retry.matchesTransient(error.data.responseBody)
     )
       return undefined
     if (error.data.responseBody?.includes("FreeUsageLimitError")) {
@@ -150,12 +142,8 @@ export function retryable(error: Err, provider: string) {
   const lower = message.toLowerCase()
   if (lower.includes("too_many_requests")) return { message: "Too Many Requests" }
   if (lower.includes("exhausted") || lower.includes("unavailable")) return { message: "Provider is overloaded" }
-  if (matchesRetryableMessage(message)) return { message }
+  if (Retry.matchesTransient(message)) return { message }
   return undefined
-}
-
-function matchesRetryableMessage(value: unknown) {
-  return typeof value === "string" && RETRYABLE_MESSAGE_PATTERNS.some((pattern) => pattern.test(value))
 }
 
 function str(value: unknown) {

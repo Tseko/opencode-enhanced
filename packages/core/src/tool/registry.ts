@@ -22,11 +22,30 @@ export type ExecuteInput = {
 
 export interface Interface {
   readonly materialize: (permissions?: PermissionV2.Ruleset) => Effect.Effect<Materialization>
+  /** Inspectable registry state for readiness records, diagnostics, and tests. */
+  readonly stats: () => Effect.Effect<RegistryStats>
   /** Internal registration capability exposed publicly only through Tools.Service. */
   readonly register: (tools: Readonly<Record<string, AnyTool>>) => Effect.Effect<void, RegistrationError, Scope.Scope>
 }
 
+/** Inspectable registry state: held registration entries and the current snapshot version. */
+export interface RegistryStats {
+  readonly registrations: number
+  readonly epoch: number
+  readonly hash: string
+}
+
 export interface Materialization {
+  /**
+   * Monotonic snapshot version of the registry. It advances only when `hash` changes, so a
+   * caller can tell a genuinely new tool set from a rebuild of the same one.
+   */
+  readonly epoch: number
+  /**
+   * Content hash of the registered definitions (names, descriptions, schemas, permission
+   * actions). Describes the registered set, independent of one agent's permission filter.
+   */
+  readonly hash: string
   readonly definitions: ReadonlyArray<ToolDefinition>
   readonly settle: (input: ExecuteInput) => Effect.Effect<Settlement, ToolOutputStore.Error>
 }
@@ -46,6 +65,52 @@ const registryLayer = Layer.effect(
     const resources = yield* ToolOutputStore.Service
     type Registration = { readonly identity: object; readonly tool: AnyTool }
     const local = new Map<string, Array<{ readonly token: object; readonly registration: Registration }>>()
+    const fingerprints = new WeakMap<object, string>()
+    let epoch = 0
+    let version: string | undefined
+
+    /**
+     * Content identity of one registration, cached by its immutable identity object. A
+     * repeat registration of the same tool therefore keeps the same fingerprint, which is
+     * what lets `materialize` report a stable hash across reconnects.
+     */
+    const fingerprintOf = (name: string, registration: Registration) => {
+      const cached = fingerprints.get(registration.identity)
+      if (cached !== undefined) return cached
+      const value = definition(name, registration.tool)
+      const fingerprint = JSON.stringify({
+        name: value.name,
+        description: value.description,
+        inputSchema: value.inputSchema,
+        outputSchema: value.outputSchema,
+        permission: permission(registration.tool, name),
+      })
+      fingerprints.set(registration.identity, fingerprint)
+      return fingerprint
+    }
+
+    /**
+     * Current registration set plus its snapshot version. The identity is computed before a
+     * permission filter: it versions the registered set, not one agent's advertised subset,
+     * so a reconnect that re-registers identical definitions keeps the same hash and epoch.
+     */
+    const snapshot = () => {
+      const registrations = new Map(applications.entries())
+      for (const [name, entries] of local) {
+        const registration = entries.at(-1)?.registration
+        if (registration) registrations.set(name, registration)
+      }
+      const hash = fingerprint(
+        [...registrations]
+          .map(([name, registration]) => `${name}\u0000${fingerprintOf(name, registration)}`)
+          .toSorted(),
+      )
+      if (hash !== version) {
+        version = hash
+        epoch += 1
+      }
+      return { registrations, hash }
+    }
 
     const settleWith = Effect.fn("ToolRegistry.settle")(function* (input: ExecuteInput, advertised?: object) {
       const registration =
@@ -86,11 +151,16 @@ const registryLayer = Layer.effect(
         const entries = Object.entries(tools)
         if (entries.length === 0) return
         yield* Effect.forEach(entries, ([name]) => validateName(name), { discard: true })
+        // The owner is the registering scope: a repeat registration from the same scope
+        // replaces its own entry instead of growing the list, and closing the scope removes
+        // exactly the entries it owns.
+        const token = yield* Scope.Scope
         yield* Effect.uninterruptible(
           Effect.gen(function* () {
-            const token = {}
-            for (const [name, tool] of entries)
-              local.set(name, [...(local.get(name) ?? []), { token, registration: { identity: {}, tool } }])
+            for (const [name, tool] of entries) {
+              const prior = (local.get(name) ?? []).filter((entry) => entry.token !== token)
+              local.set(name, [...prior, { token, registration: { identity: {}, tool } }])
+            }
             yield* Effect.addFinalizer(() =>
               Effect.sync(() => {
                 for (const [name] of entries) {
@@ -103,16 +173,21 @@ const registryLayer = Layer.effect(
           }),
         )
       }),
+      stats: Effect.fn("ToolRegistry.stats")(function* () {
+        const { hash } = snapshot()
+        const registrations = [...local.values()].reduce((total, entries) => total + entries.length, 0)
+        return { registrations: registrations + applications.entries().size, epoch, hash }
+      }),
       materialize: Effect.fn("ToolRegistry.materialize")(function* (permissions = []) {
-        const registrations = new Map(applications.entries())
-        for (const [name, entries] of local) {
-          const registration = entries.at(-1)?.registration
-          if (registration) registrations.set(name, registration)
-        }
+        const { registrations, hash } = snapshot()
         for (const [name, registration] of registrations)
           if (whollyDisabled(permission(registration.tool, name), permissions)) registrations.delete(name)
         return {
-          definitions: Array.from(registrations, ([name, registration]) => definition(name, registration.tool)),
+          epoch,
+          hash,
+          definitions: [...registrations]
+            .toSorted(([left], [right]) => left.localeCompare(right))
+            .map(([name, registration]) => definition(name, registration.tool)),
           settle: (input) => {
             const registration = registrations.get(input.call.name)
             if (registration) return settleWith(input, registration.identity)
@@ -132,6 +207,21 @@ const layer = Layer.effect(
 function whollyDisabled(action: string, rules: PermissionV2.Ruleset) {
   const rule = rules.findLast((rule) => Wildcard.match(action, rule.action))
   return rule?.resource === "*" && rule.effect === "deny"
+}
+
+/**
+ * Change detector for the registry snapshot, not a security primitive: a collision only
+ * means a version bump is missed, never that a stale owner is trusted (settlement still
+ * compares registration identities).
+ */
+function fingerprint(parts: ReadonlyArray<string>) {
+  let hash = 0x811c9dc5
+  const value = parts.join("\u0001")
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash.toString(16).padStart(8, "0")
 }
 
 export const node = makeLocationNode({

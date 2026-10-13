@@ -45,6 +45,7 @@ const INTL = DESKTOP_NATIVE_LOCALE_TAGS
 
 const base = i18n.flatten({ ...en, ...uiEn })
 const dicts = new Map<Locale, Dictionary>([["en", base]])
+const pending = new Map<Locale, Promise<Dictionary>>()
 
 const merge = (app: Promise<Source>, ui: Promise<Source>) =>
   Promise.all([app, ui]).then(([a, b]) => ({ ...base, ...i18n.flatten({ ...a.dict, ...b.dict }) }) as Dictionary)
@@ -117,11 +118,17 @@ function loadDict(locale: Locale) {
   const hit = dicts.get(locale)
   if (hit) return Promise.resolve(hit)
   if (locale === "en") return Promise.resolve(base)
+  const loading = pending.get(locale)
+  if (loading) return loading
   const load = loaders[locale]
-  return load().then((next: Dictionary) => {
-    dicts.set(locale, next)
-    return next
-  })
+  const promise = load()
+    .then((next: Dictionary) => {
+      dicts.set(locale, next)
+      return next
+    })
+    .finally(() => pending.delete(locale))
+  pending.set(locale, promise)
+  return promise
 }
 
 export function loadLocaleDict(locale: Locale) {

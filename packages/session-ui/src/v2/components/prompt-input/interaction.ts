@@ -37,8 +37,13 @@ export type PromptInputV2ViewConfig = {
   submit: {
     stopping: Accessor<boolean>
     working?: Accessor<boolean>
-    onSubmit: () => void
+    /** `queue` asks the host to hold the prompt until the session would otherwise idle. */
+    onSubmit: (options?: { queue?: boolean }) => void
     onStop: () => void
+    /** Host copy for the delivery menu shown next to the send button. */
+    sendNowLabel?: string
+    queueLabel?: string
+    queueShortcut?: string
   }
   shell?: {
     onOpen: () => void
@@ -357,8 +362,8 @@ export function createPromptInputV2Controller(input: {
     closeShell() {
       dispatch({ type: "mode.normal" })
     },
-    submit() {
-      input.view.submit.onSubmit()
+    submit(options?: { queue?: boolean }) {
+      input.view.submit.onSubmit(options)
       dispatch({ type: "popover.close" })
     },
     stop() {

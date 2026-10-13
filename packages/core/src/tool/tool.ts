@@ -46,6 +46,12 @@ type Config<
   readonly input: Input
   readonly output: Output
   readonly structured?: Structured
+  /**
+   * JSON Schema advertised to the model in place of the one derived from `input`.
+   * Use for tools whose parameters are owned by an external system (for example a
+   * remote MCP server) and therefore are not modeled as an Effect Schema.
+   */
+  readonly jsonSchema?: JsonSchema.JsonSchema
   readonly toStructuredOutput?: (input: {
     readonly input: Schema.Schema.Type<Input>
     readonly output: Output["Encoded"]
@@ -82,7 +88,7 @@ export function make<
       const definition = new ToolDefinition({
         name,
         description: config.description,
-        inputSchema: toJsonSchema(config.input),
+        inputSchema: config.jsonSchema ?? toJsonSchema(config.input),
         outputSchema: toJsonSchema(config.structured ?? config.output),
       })
       definitions.set(name, definition)

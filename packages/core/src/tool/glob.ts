@@ -14,6 +14,7 @@ import { Tool } from "./tool"
 import { Tools } from "./tools"
 
 export const name = "glob"
+export const DEFAULT_LIMIT = 100
 
 export const Input = Schema.Struct({
   pattern: FileSystem.GlobInput.fields.pattern.annotate({ description: "Glob pattern to match files against" }),
@@ -29,8 +30,13 @@ export const Output = Schema.Array(FileSystem.Entry)
 type ModelOutput = typeof Output.Encoded
 
 /** Format raw search results into the concise line-oriented output models expect. */
-export const toModelOutput = (output: ModelOutput) => {
+export const toModelOutput = (output: ModelOutput, limited = false) => {
   const lines = output.length === 0 ? ["No files found"] : output.map((item) => item.path)
+  if (limited)
+    lines.push(
+      "",
+      `(Result limit reached: showing ${output.length} results. More files may be available; consider using a more specific path or pattern.)`,
+    )
   return lines.join("\n")
 }
 
@@ -49,11 +55,12 @@ const layer = Layer.effectDiscard(
             "Find files by glob pattern within the active Location. Returns concise relative file resources. Use a relative path to narrow the search and limit to bound the result count.",
           input: Input,
           output: Output,
-          toModelOutput: ({ output }) => [
+          toModelOutput: ({ input, output }) => [
             {
               type: "text",
               text: toModelOutput(
                 output.map((entry) => ({ ...entry, path: path.resolve(location.directory, entry.path) })),
+                output.length >= (input.limit ?? DEFAULT_LIMIT),
               ),
             },
           ],
@@ -77,7 +84,7 @@ const layer = Layer.effectDiscard(
                 .glob({
                   cwd,
                   pattern: input.pattern,
-                  limit: input.limit ?? Number.MAX_SAFE_INTEGER,
+                  limit: input.limit ?? DEFAULT_LIMIT,
                 })
                 .pipe(
                   Effect.map((result) =>

@@ -15,6 +15,7 @@ import { Tool } from "./tool"
 import { Tools } from "./tools"
 
 export const name = "grep"
+export const DEFAULT_LIMIT = 100
 
 export const Input = Schema.Struct({
   pattern: FileSystem.GrepInput.fields.pattern.annotate({
@@ -35,8 +36,13 @@ export const Output = Schema.Array(FileSystem.Match)
 type ModelOutput = typeof Output.Encoded
 
 /** Format raw search matches into the familiar concise model output. */
-export const toModelOutput = (output: ModelOutput) => {
-  const lines = output.length === 0 ? ["No files found"] : [`Found ${output.length} matches`]
+export const toModelOutput = (output: ModelOutput, limited = false) => {
+  const lines =
+    output.length === 0
+      ? ["No matches found"]
+      : [
+          `Found ${output.length} ${output.length === 1 ? "match" : "matches"}${limited ? " (result limit reached; more matches may be available)" : ""}`,
+        ]
   let current = ""
   for (const match of output) {
     if (current !== match.entry.path) {
@@ -65,7 +71,7 @@ const layer = Layer.effectDiscard(
             "Search file contents by regular expression within the active Location or an absolute managed tool-output file. Use a path to narrow the search, include to filter files by glob, and limit to bound the match count. Returns concise file resources, line numbers, and bounded line previews.",
           input: Input,
           output: Output,
-          toModelOutput: ({ output }) => [
+          toModelOutput: ({ input, output }) => [
             {
               type: "text",
               text: toModelOutput(
@@ -73,6 +79,7 @@ const layer = Layer.effectDiscard(
                   ...match,
                   entry: { ...match.entry, path: path.resolve(location.directory, match.entry.path) },
                 })),
+                output.length >= (input.limit ?? DEFAULT_LIMIT),
               ),
             },
           ],
@@ -100,7 +107,7 @@ const layer = Layer.effectDiscard(
                   pattern: input.pattern,
                   file: info?.type === "File" ? path.basename(target) : undefined,
                   include: input.include,
-                  limit: input.limit ?? Number.MAX_SAFE_INTEGER,
+                  limit: input.limit ?? DEFAULT_LIMIT,
                 })
                 .pipe(
                   Effect.map((result) =>

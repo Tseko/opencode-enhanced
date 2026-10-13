@@ -7,6 +7,7 @@ import {
   type Model,
   type ProviderMetadata,
 } from "@opencode-ai/llm"
+import { SessionCompaction } from "../compaction"
 import { SessionMessage } from "../message"
 import type { FileAttachment } from "../prompt"
 
@@ -17,6 +18,59 @@ const media = (file: FileAttachment): ContentPart => ({
   filename: file.name,
   metadata: file.description === undefined ? undefined : { description: file.description },
 })
+
+// Modalities accepted by `ModelV2.Info.capabilities.input`.
+const mimeModality = (mime: string): string | undefined => {
+  if (mime.startsWith("image/")) return "image"
+  if (mime.startsWith("audio/")) return "audio"
+  if (mime.startsWith("video/")) return "video"
+  if (mime === "application/pdf") return "pdf"
+  return undefined
+}
+
+const textMime = (mime: string) => {
+  if (mime.startsWith("text/")) return true
+  if (mime.endsWith("+json") || mime.endsWith("+xml") || mime.endsWith("+yaml")) return true
+  return (
+    mime === "application/json" ||
+    mime === "application/xml" ||
+    mime === "application/yaml" ||
+    mime === "application/x-yaml" ||
+    mime === "application/toml" ||
+    mime === "application/x-toml"
+  )
+}
+
+const dataUrlText = (uri: string) => {
+  const match = /^data:[^,]*;base64,(.*)$/s.exec(uri)
+  if (!match) return undefined
+  return Buffer.from(match[1]!, "base64").toString("utf8")
+}
+
+// Providers only accept a small set of media types and reject the whole request
+// otherwise. Keep real media for supported modalities, inline text attachments as
+// text, and degrade anything else to a visible note instead of failing the turn.
+const fileContent = (file: FileAttachment, input: ReadonlyArray<string> | undefined): ContentPart | undefined => {
+  if (file.mime === "application/x-directory") return undefined
+  const modality = mimeModality(file.mime)
+  if (modality) {
+    // An empty capability list means the provider did not declare modalities; attempt the
+    // attachment rather than silently dropping it. Only an explicit list without the
+    // modality is treated as unsupported.
+    if (input === undefined || input.length === 0 || input.includes(modality)) return media(file)
+    const name = file.name === undefined ? modality : `"${file.name}"`
+    return {
+      type: "text",
+      text: `ERROR: Cannot read ${name} (this model does not support ${modality} input). Inform the user.`,
+    }
+  }
+  if (textMime(file.mime)) {
+    const text = dataUrlText(file.uri)
+    if (text !== undefined)
+      return { type: "text", text: file.name === undefined ? text : `Attached file "${file.name}":\n\n${text}` }
+  }
+  return { type: "text", text: `[Attached ${file.name ?? "file"}: ${file.mime}]` }
+}
 
 const toolInput = (tool: SessionMessage.AssistantTool) => {
   if (tool.state.status !== "pending") return tool.state.input
@@ -37,7 +91,25 @@ const toolCall = (tool: SessionMessage.AssistantTool, providerMetadata: Provider
   })
 
 const toolResult = (tool: SessionMessage.AssistantTool, providerMetadata: ProviderMetadata | undefined) => {
+  if (tool.state.status === "pending" || tool.state.status === "running") {
+    return ToolResultPart.make({
+      id: tool.id,
+      name: tool.name,
+      result: { error: { type: "unknown", message: "Tool execution interrupted" }, content: [], structured: {} },
+      resultType: "error",
+      providerExecuted: tool.provider?.executed,
+      providerMetadata,
+    })
+  }
   if (tool.state.status === "completed") {
+    if (tool.time.pruned)
+      return ToolResultPart.make({
+        id: tool.id,
+        name: tool.name,
+        result: { type: "text", value: SessionCompaction.PRUNED_TOOL_RESULT },
+        providerExecuted: tool.provider?.executed,
+        providerMetadata,
+      })
     // TODO: Materialize remote and managed URIs before provider-history lowering.
     // ToolOutput.toResultValue rejects unresolved URIs rather than treating them as media bytes.
     const result =
@@ -112,7 +184,11 @@ const assistant = (message: SessionMessage.Assistant, model: Model) => {
   ]
 }
 
-function toLLMMessage(message: SessionMessage.Message, model: Model): Message[] {
+function toLLMMessage(
+  message: SessionMessage.Message,
+  model: Model,
+  input: ReadonlyArray<string> | undefined,
+): Message[] {
   switch (message.type) {
     case "agent-switched":
     case "model-switched":
@@ -122,7 +198,13 @@ function toLLMMessage(message: SessionMessage.Message, model: Model): Message[] 
         Message.make({
           id: message.id,
           role: "user",
-          content: [{ type: "text", text: message.text }, ...(message.files ?? []).map(media)],
+          content: [
+            { type: "text", text: message.text },
+            ...(message.files ?? []).flatMap((file): ContentPart[] => {
+              const part = fileContent(file, input)
+              return part === undefined ? [] : [part]
+            }),
+          ],
           metadata: {
             ...message.metadata,
             ...(message.agents?.length ? { agents: message.agents } : {}),
@@ -138,7 +220,7 @@ function toLLMMessage(message: SessionMessage.Message, model: Model): Message[] 
         Message.make({
           id: message.id,
           role: "user",
-          content: `Shell command: ${message.command}\n\n${message.output}`,
+          content: `Shell command: ${message.command}\n\n${SessionCompaction.truncateOutput(message.output)}`,
           metadata: message.metadata,
         }),
       ]
@@ -167,5 +249,8 @@ ${message.recent}
 }
 
 /** Translate projected V2 Session history into canonical @opencode-ai/llm context. */
-export const toLLMMessages = (messages: readonly SessionMessage.Message[], model: Model) =>
-  messages.flatMap((message) => toLLMMessage(message, model))
+export const toLLMMessages = (
+  messages: readonly SessionMessage.Message[],
+  model: Model,
+  input?: ReadonlyArray<string>,
+) => messages.flatMap((message) => toLLMMessage(message, model, input))

@@ -109,6 +109,8 @@ export const dict: Record<string, string> = {
   "command.category.workspace": "වැඩබිම",
   "command.category.settings": "සැකසීම්",
   "command.logs.export": "ලොග් අපනයනය කරන්න",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "පද්ධතිය",
   "theme.scheme.light": "ආලෝකය",
   "theme.scheme.dark": "අඳුරු",

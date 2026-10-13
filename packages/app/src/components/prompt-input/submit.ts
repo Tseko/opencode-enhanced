@@ -316,7 +316,7 @@ export function createPromptSubmit(input: PromptSubmitInput) {
     })
   }
 
-  const handleSubmit = async (event: Event) => {
+  const handleSubmit = async (event: Event, options?: { queue?: boolean }) => {
     event.preventDefault()
 
     const target = prompt.capture()
@@ -480,7 +480,7 @@ export function createPromptSubmit(input: PromptSubmitInput) {
       return true
     }
 
-    if (!isNewSession && mode === "normal" && input.shouldQueue?.()) {
+    if (!isNewSession && mode === "normal" && (options?.queue || input.shouldQueue?.())) {
       input.onQueue?.(draft)
       clearContext(submission.target())
       clearInput()

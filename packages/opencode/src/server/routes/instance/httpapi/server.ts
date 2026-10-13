@@ -19,6 +19,7 @@ import { Installation } from "@/installation"
 import { LSP } from "@/lsp/lsp"
 import { MCP } from "@/mcp"
 import { McpAuth } from "@/mcp/auth"
+import { McpDynamicTools } from "@/mcp/dynamic-tools"
 import { Permission } from "@/permission"
 import { Plugin } from "@/plugin"
 import { PluginPtyEnvironment } from "@/plugin/pty-environment"
@@ -68,6 +69,7 @@ import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
 import * as SessionExecutionLocal from "@opencode-ai/core/session/execution/local"
 import { SessionRunnerModelAuth } from "@/session/runner-model-auth"
+import { DynamicTools } from "@opencode-ai/core/tool/dynamic-tools"
 import { lazy } from "@/util/lazy"
 import { CorsConfig, isAllowedCorsOrigin, type CorsOptions } from "@opencode-ai/server/cors"
 import { serveUIEffect } from "@/server/shared/ui"
@@ -273,7 +275,11 @@ const app = LayerNode.group([
 export function createRoutes(
   corsOptions?: CorsOptions,
 ): Layer.Layer<never, EffectConfig.ConfigError, RouteRequirements> {
-  const locationServiceMapV2 = buildLocationServiceMap([[SessionRunnerModel.node, SessionRunnerModelAuth.node]])
+  const locationServiceMapV2 = buildLocationServiceMap([
+    [SessionRunnerModel.node, SessionRunnerModelAuth.node],
+    // Core ships an empty placeholder; connected MCP servers register their tools here.
+    [DynamicTools.node, McpDynamicTools.node],
+  ])
 
   return Layer.mergeAll(
     rootApiRoutes,

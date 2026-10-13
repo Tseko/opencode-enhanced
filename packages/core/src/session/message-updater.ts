@@ -208,6 +208,9 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
       },
       "session.next.step.ended": (event) => {
         return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
+          // Terminals are monotonic: the first durable terminal wins. A late settle or a
+          // second terminal can never rewrite an assistant that already ended.
+          if (draft.time.completed) return
           draft.time.completed = event.data.timestamp
           draft.finish = event.data.finish
           draft.cost = event.data.cost
@@ -222,6 +225,7 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
       },
       "session.next.step.failed": (event) => {
         return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
+          if (draft.time.completed) return
           draft.time.completed = event.data.timestamp
           draft.finish = "error"
           draft.error = event.data.error

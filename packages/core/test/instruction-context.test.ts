@@ -82,20 +82,21 @@ describe("InstructionContext", () => {
           expect(initialized.baseline).not.toContain("outside")
 
           yield* Effect.promise(() => fs.writeFile(packageFile, "changed"))
-          expect(yield* SystemContext.reconcile(yield* load, initialized.snapshot)).toMatchObject({
+          const changed = yield* SystemContext.reconcile(yield* load, initialized.snapshot)
+          expect(changed).toMatchObject({
             _tag: "Updated",
-            text: expect.stringContaining(`Instructions from: ${packageFile}\nchanged`),
+            text: expect.stringContaining(`Updated instructions from: ${packageFile}\nchanged`),
           })
+          if (changed._tag === "Updated") {
+            expect(changed.text).not.toContain(`Instructions from: ${globalFile}\nglobal`)
+            expect(changed.text).not.toContain(`Instructions from: ${projectFile}\nproject`)
+          }
 
           yield* Effect.promise(() => fs.rm(packageFile))
           const partial = yield* SystemContext.reconcile(yield* load, initialized.snapshot)
           expect(partial).toEqual({
             _tag: "Updated",
-            text: [
-              "These instructions replace all previously loaded ambient instructions.",
-              `Instructions from: ${globalFile}\nglobal`,
-              `Instructions from: ${projectFile}\nproject`,
-            ].join("\n\n"),
+            text: `Instructions from: ${packageFile} no longer apply.`,
             snapshot: expect.any(Object),
           })
 
@@ -485,6 +486,91 @@ autrady`,
       )
 
       expect(scanned).toBe(false)
+    }),
+  )
+
+  it.effect("caps oversized AGENTS.md and points the model at read", () =>
+    Effect.gen(function* () {
+      const file = AbsolutePath.make("/repo/AGENTS.md")
+      const content = Array.from({ length: InstructionContext.MAX_FILE_LINES + 50 }, (_, index) => `line-${index}`).join(
+        "\n",
+      )
+      const cappedFS = Layer.effect(
+        FSUtil.Service,
+        FSUtil.Service.pipe(
+          Effect.map((fs) =>
+            FSUtil.Service.of({
+              ...fs,
+              up: () => Effect.succeed([file]),
+              glob: () => Effect.succeed([]),
+              resolve: (path) => Effect.succeed(path),
+              readFileStringSafe: (path) => Effect.succeed(path === file ? content : undefined),
+            }),
+          ),
+        ),
+      ).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
+      const context = yield* SystemContextRegistry.Service.pipe(
+        Effect.flatMap((service) => service.load()),
+        Effect.provide(
+          instructionLayer({
+            config: "/global",
+            filesystemLayer: cappedFS,
+            locationServiceLayer: Layer.succeed(
+              Location.Service,
+              Location.Service.of(location({ directory: AbsolutePath.make("/repo") })),
+            ),
+          }),
+        ),
+      )
+
+      const baseline = (yield* SystemContext.initialize(context)).baseline
+      expect(baseline).toContain(`Instructions from: ${file}`)
+      expect(baseline).toContain("line-0")
+      expect(baseline).toContain(`line-${InstructionContext.MAX_FILE_LINES - 1}`)
+      expect(baseline).not.toContain(`line-${InstructionContext.MAX_FILE_LINES}`)
+      expect(baseline).toContain("Use the read tool on this path to load the rest.")
+    }),
+  )
+
+  it.effect("omits later instruction files once the aggregate budget is full", () =>
+    Effect.gen(function* () {
+      const first = AbsolutePath.make("/repo/AGENTS.md")
+      const extra = AbsolutePath.make("/global/rules/extra.md")
+      const chunk = "x".repeat(InstructionContext.MAX_FILE_BYTES)
+      const overflowingFS = Layer.effect(
+        FSUtil.Service,
+        FSUtil.Service.pipe(
+          Effect.map((fs) =>
+            FSUtil.Service.of({
+              ...fs,
+              up: () => Effect.succeed([first]),
+              glob: () => Effect.succeed([extra]),
+              resolve: (path) => Effect.succeed(path),
+              readFileStringSafe: (path) => Effect.succeed(path === first || path === extra ? chunk : undefined),
+            }),
+          ),
+        ),
+      ).pipe(Layer.provide(LayerNode.compile(FSUtil.node)))
+      const context = yield* SystemContextRegistry.Service.pipe(
+        Effect.flatMap((service) => service.load()),
+        Effect.provide(
+          instructionLayer({
+            config: "/global",
+            filesystemLayer: overflowingFS,
+            locationServiceLayer: Layer.succeed(
+              Location.Service,
+              Location.Service.of(location({ directory: AbsolutePath.make("/repo") })),
+            ),
+          }),
+        ),
+      )
+
+      const baseline = (yield* SystemContext.initialize(context)).baseline
+      expect(baseline).toContain(`Instructions from: ${first}`)
+      expect(baseline).toContain(`Instructions from: ${extra}`)
+      expect(baseline).toContain("Use the read tool on this path to load it.")
+      expect(baseline.split(chunk).length - 1).toBe(1)
+      expect(Buffer.byteLength(baseline, "utf-8")).toBeLessThanOrEqual(InstructionContext.MAX_TOTAL_BYTES)
     }),
   )
 })

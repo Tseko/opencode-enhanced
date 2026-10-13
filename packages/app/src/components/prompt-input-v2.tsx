@@ -16,7 +16,7 @@ import { promptDesignPlaceholder, promptPlaceholder } from "@/components/prompt-
 import { createPromptSubmit } from "@/components/prompt-input/submit"
 import { selectionFromLines, type SelectedLineRange, useFile } from "@/context/file"
 import { useComments } from "@/context/comments"
-import { useCommand } from "@/context/command"
+import { formatKeybind, useCommand } from "@/context/command"
 import { useLanguage } from "@/context/language"
 import { useLayout } from "@/context/layout"
 import { usePermission } from "@/context/permission"
@@ -403,8 +403,12 @@ export function usePromptInputV2Controller(props: PromptInputV2ControllerProps):
       submit: {
         stopping,
         working,
-        onSubmit: () => void submission.handleSubmit(new Event("submit")),
+        onSubmit: (options) =>
+          void submission.handleSubmit(new Event("submit"), { queue: !!options?.queue && working() }),
         onStop: () => void submission.abort(),
+        sendNowLabel: language.t("session.followupDock.sendNow"),
+        queueLabel: language.t("settings.general.row.followup.option.queue"),
+        queueShortcut: formatKeybind("mod+enter", language.t),
       },
     },
   })

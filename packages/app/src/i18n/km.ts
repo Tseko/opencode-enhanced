@@ -109,6 +109,8 @@ export const dict = {
   "command.category.workspace": "កន្លែងធ្វើការ",
   "command.category.settings": "ការកំណត់",
   "command.logs.export": "នាំចេញកំណត់ហេតុ",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "ប្រព័ន្ធ",
   "theme.scheme.light": "ពន្លឺ",
   "theme.scheme.dark": "ងងឹត",

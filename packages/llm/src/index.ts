@@ -1,5 +1,7 @@
 export { LLMClient } from "./route/client"
 export { Auth } from "./route/auth"
+export { ProviderAdmission } from "./route/admission"
+export * from "./retry"
 export { Provider } from "./provider"
 export { isContextOverflow, isContextOverflowFailure } from "./provider-error"
 export type {

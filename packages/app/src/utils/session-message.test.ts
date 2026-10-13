@@ -103,6 +103,56 @@ describe("normalizeSessionMessages", () => {
     })
   })
 
+  test("projects current file attachments that carry a uri and no resolved source", () => {
+    // Current servers send `uri`-based attachments, while the vendored client snapshot still
+    // describes the older inline/base64 payload, so the fixture is asserted rather than satisfied.
+    const source = [
+      {
+        id: "msg_user",
+        type: "user",
+        text: "what do you see ?",
+        files: [
+          { uri: "data:image/png;base64,aGVsbG8=", mime: "image/png", name: "image.png" },
+          {
+            uri: "file:///repo/src/client.ts",
+            mime: "text/plain",
+            name: "client.ts",
+            source: { start: 8, end: 22, text: "@src/client.ts" },
+          },
+        ],
+        agents: [{ name: "review", source: { start: 0, end: 7, text: "@review" } }],
+        time: { created: 1 },
+      },
+    ] as unknown as SessionMessageInfo[]
+
+    const result = normalizeSessionMessages("ses_1", source)
+
+    expect(result.parts.get("msg_user")).toEqual([
+      expect.objectContaining({ type: "text", text: "what do you see ?" }),
+      expect.objectContaining({
+        type: "file",
+        mime: "image/png",
+        filename: "image.png",
+        url: "data:image/png;base64,aGVsbG8=",
+        source: undefined,
+      }),
+      expect.objectContaining({
+        type: "file",
+        url: "file:///repo/src/client.ts",
+        source: {
+          type: "file",
+          path: "src/client.ts",
+          text: { value: "@src/client.ts", start: 8, end: 22 },
+        },
+      }),
+      expect.objectContaining({
+        type: "agent",
+        name: "review",
+        source: { value: "@review", start: 0, end: 7 },
+      }),
+    ])
+  })
+
   test("does not invent a parent for an assistant-only page", () => {
     const source = [
       {

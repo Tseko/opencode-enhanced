@@ -3,6 +3,7 @@ import { Message, Model } from "@opencode-ai/llm"
 import * as OpenAIChat from "@opencode-ai/llm/protocols/openai-chat"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
+import { SessionCompaction } from "@opencode-ai/core/session/compaction"
 import { SessionMessage } from "@opencode-ai/core/session/message"
 import { AgentAttachment, FileAttachment } from "@opencode-ai/core/session/prompt"
 import { toLLMMessages } from "@opencode-ai/core/session/runner/to-llm-message"
@@ -139,6 +140,144 @@ Recent work
     ])
   })
 
+  test("inlines text attachments instead of emitting unsupported media", () => {
+    const messages = toLLMMessages(
+      [
+        SessionMessage.User.make({
+          id: id("user-text"),
+          type: "user",
+          text: "Read this",
+          files: [
+            FileAttachment.make({ uri: "data:text/plain;base64,aGVsbG8=", mime: "text/plain", name: "notes.txt" }),
+          ],
+          time: { created },
+        }),
+      ],
+      model,
+    )
+
+    expect(messages[0]?.content).toEqual([
+      { type: "text", text: "Read this" },
+      { type: "text", text: `Attached file "notes.txt":\n\nhello` },
+    ])
+  })
+
+  test("degrades media the model cannot accept into a visible note", () => {
+    const messages = toLLMMessages(
+      [
+        SessionMessage.User.make({
+          id: id("user-image-unsupported"),
+          type: "user",
+          text: "Inspect",
+          files: [
+            FileAttachment.make({ uri: "data:image/png;base64,aGVsbG8=", mime: "image/png", name: "hello.png" }),
+          ],
+          time: { created },
+        }),
+      ],
+      model,
+      ["text"],
+    )
+
+    expect(messages[0]?.content).toEqual([
+      { type: "text", text: "Inspect" },
+      {
+        type: "text",
+        text: `ERROR: Cannot read "hello.png" (this model does not support image input). Inform the user.`,
+      },
+    ])
+  })
+
+  test("attempts media when the model declares no input modalities", () => {
+    const messages = toLLMMessages(
+      [
+        SessionMessage.User.make({
+          id: id("user-image-unknown"),
+          type: "user",
+          text: "Inspect",
+          files: [
+            FileAttachment.make({ uri: "data:image/png;base64,aGVsbG8=", mime: "image/png", name: "hello.png" }),
+          ],
+          time: { created },
+        }),
+      ],
+      model,
+      [],
+    )
+
+    expect(messages[0]?.content).toEqual([
+      { type: "text", text: "Inspect" },
+      { type: "media", mediaType: "image/png", data: "data:image/png;base64,aGVsbG8=", filename: "hello.png" },
+    ])
+  })
+
+  test("bounds shell replay the same way compaction truncates tool output", () => {
+    const output = `${"x".repeat(SessionCompaction.TOOL_OUTPUT_MAX_CHARS + 50)}\nmore`
+    const messages = toLLMMessages(
+      [
+        SessionMessage.Shell.make({
+          id: id("shell-huge"),
+          type: "shell",
+          callID: "shell-huge",
+          command: "cat huge",
+          output,
+          time: { created, completed: created },
+        }),
+      ],
+      model,
+    )
+
+    expect(messages[0]?.content).toEqual([
+      {
+        type: "text",
+        text: `Shell command: cat huge\n\n${SessionCompaction.truncateOutput(output)}`,
+      },
+    ])
+    expect(JSON.stringify(messages[0]?.content)).not.toContain("more")
+  })
+
+  test("replays pruned tool output as a cleared placeholder", () => {
+    const messages = toLLMMessages(
+      [
+        SessionMessage.Assistant.make({
+          id: id("assistant-pruned"),
+          type: "assistant",
+          agent: "build",
+          model: { id: ModelV2.ID.make("model"), providerID: ProviderV2.ID.make("provider") },
+          content: [
+            SessionMessage.AssistantTool.make({
+              type: "tool",
+              id: "old",
+              name: "bash",
+              state: SessionMessage.ToolStateCompleted.make({
+                status: "completed",
+                input: { command: "echo huge" },
+                content: [{ type: "text", text: "stale output" }],
+                structured: {},
+              }),
+              time: { created, completed: created, pruned: created },
+            }),
+          ],
+          time: { created, completed: created },
+        }),
+      ],
+      model,
+    )
+
+    expect(messages).toHaveLength(2)
+    expect(messages[0]?.content).toMatchObject([
+      { type: "tool-call", id: "old", name: "bash", input: { command: "echo huge" } },
+    ])
+    expect(messages[1]?.content).toMatchObject([
+      {
+        type: "tool-result",
+        id: "old",
+        name: "bash",
+        result: { type: "text", value: SessionCompaction.PRUNED_TOOL_RESULT },
+      },
+    ])
+  })
+
   test("replays durable tool media into canonical tool messages without structured base64", () => {
     const messages = toLLMMessages(
       [
@@ -232,7 +371,7 @@ Recent work
       model,
     )
 
-    expect(messages.map((message) => message.role)).toEqual(["assistant", "tool"])
+    expect(messages.map((message) => message.role)).toEqual(["assistant", "tool", "tool", "tool"])
     expect(messages[0]?.content).toEqual([
       { type: "text", text: "Checking" },
       { type: "reasoning", text: "Think", providerMetadata: { anthropic: { signature: "sig_1" } } },
@@ -281,6 +420,28 @@ Recent work
       },
     ])
     expect(messages[1]?.content).toEqual([
+      {
+        type: "tool-result",
+        id: "pending",
+        name: "read",
+        result: {
+          type: "error",
+          value: { error: { type: "unknown", message: "Tool execution interrupted" }, content: [], structured: {} },
+        },
+      },
+    ])
+    expect(messages[2]?.content).toEqual([
+      {
+        type: "tool-result",
+        id: "running",
+        name: "read",
+        result: {
+          type: "error",
+          value: { error: { type: "unknown", message: "Tool execution interrupted" }, content: [], structured: {} },
+        },
+      },
+    ])
+    expect(messages[3]?.content).toEqual([
       {
         type: "tool-result",
         id: "completed",

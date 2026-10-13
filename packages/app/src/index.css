@@ -8,6 +8,7 @@
   src: url("/assets/JetBrainsMonoNerdFontMono-Regular.woff2") format("woff2");
   font-weight: normal;
   font-style: normal;
+  font-display: swap;
 }
 
 @font-face {
@@ -15,6 +16,7 @@
   src: url("/assets/Inter.ttf") format("truetype");
   font-weight: 100 900;
   font-style: normal;
+  font-display: swap;
 }
 
 @media (display-mode: standalone) {
@@ -169,6 +171,34 @@
   @keyframes titlebar-update-loader-spin {
     to {
       transform: rotate(360deg);
+    }
+  }
+
+  .session-working-pulse {
+    background: var(--surface-raised-base-hover);
+    animation: session-working-pulse 1.8s ease-in-out infinite;
+  }
+
+  .session-working-pulse-v2 {
+    background: color-mix(in srgb, var(--v2-background-bg-layer-01) 70%, transparent);
+    animation: session-working-pulse 1.8s ease-in-out infinite;
+  }
+
+  @keyframes session-working-pulse {
+    0%,
+    100% {
+      opacity: 0.2;
+    }
+    50% {
+      opacity: 0.55;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .session-working-pulse,
+    .session-working-pulse-v2 {
+      animation: none;
+      opacity: 0.4;
     }
   }
 

@@ -140,8 +140,15 @@ const createPlatform = (windowState: DesktopWindowState): Platform => {
     const cache = new Map<string, AsyncStorage>()
 
     const createStorage = (name: string) => {
+      const pending = new Map<string, Promise<string | null>>()
       const api: AsyncStorage = {
-        getItem: (key: string) => window.api.storeGet(name, key),
+        getItem: (key: string) => {
+          const loading = pending.get(key)
+          if (loading) return loading
+          const request = window.api.storeGet(name, key).finally(() => pending.delete(key))
+          pending.set(key, request)
+          return request
+        },
         setItem: (key: string, value: string) => window.api.storeSet(name, key, value),
         removeItem: (key: string) => window.api.storeDelete(name, key),
         clear: () => window.api.storeClear(name),
@@ -376,9 +383,7 @@ function DesktopRoot(props: { windowState: DesktopWindowState }) {
   function App() {
     const wslServers = useWslServers()
     const language = useLanguage()
-    const ready = createMemo(
-      () => !defaultServer.loading && !sidecar.loading && !locale.loading && !wslServers.isLoading,
-    )
+    const ready = createMemo(() => !defaultServer.loading && !sidecar.loading && !locale.loading)
     const servers = createMemo(() => {
       const data = initializationData(sidecar)
       const list: ServerConnection.Any[] = []

@@ -191,6 +191,12 @@ const main = Effect.gen(function* () {
   ensureLoopbackNoProxy()
   useEnvProxy()
   app.commandLine.appendSwitch("proxy-bypass-list", "<-loopback>")
+  // Do not let Chromium throttle or background the renderer. The app consumes a live session
+  // event stream; when the renderer is throttled while the window is unfocused, it processes
+  // the buffered backlog in one burst on refocus and the UI appears to hang and catch up.
+  app.commandLine.appendSwitch("disable-background-timer-throttling")
+  app.commandLine.appendSwitch("disable-backgrounding-occluded-windows")
+  app.commandLine.appendSwitch("disable-renderer-backgrounding")
   const features = app.commandLine.getSwitchValue("enable-features")
   app.commandLine.appendSwitch("enable-features", features ? `${jsCallStackFeature},${features}` : jsCallStackFeature)
   if (!app.isPackaged) app.commandLine.appendSwitch("remote-debugging-port", "9222")

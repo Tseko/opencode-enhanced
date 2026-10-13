@@ -112,6 +112,8 @@ export const dict = {
   "command.category.workspace": "ވޯކްސްޕޭސް",
   "command.category.settings": "ސެޓިންގސް",
   "command.logs.export": "އެކްސްޕޯޓް ލޮގްސް",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "ސިސްޓަމް",
   "theme.scheme.light": "އަލި",
   "theme.scheme.dark": "އަނދިރި",

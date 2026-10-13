@@ -109,6 +109,8 @@ export const dict = {
   "command.category.workspace": "Pracovní prostor",
   "command.category.settings": "Nastavení",
   "command.logs.export": "Exportovat protokoly",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "Systém",
   "theme.scheme.light": "Světlo",
   "theme.scheme.dark": "Tmavý",

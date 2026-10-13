@@ -108,6 +108,43 @@ function applyUsage(
     .pipe(Effect.orDie)
 }
 
+function rollSessionUsage(db: DatabaseService, sessionID: typeof SessionTable.$inferSelect.id) {
+  return Effect.gen(function* () {
+    // V2 usage lives in the `session_message` assistant rows, never in the V1 `part`
+    // usage events that `applyUsage` tracks, so the `session` aggregate columns read by
+    // legacy consumers (`session.info`, session list, external tools like opentab) would
+    // stay zero for V2 sessions. Recompute them from the assistant rows after every
+    // projection that adds or removes V2 usage.
+    const row = yield* db
+      .select({
+        cost: sql<number>`coalesce(sum(coalesce(json_extract(${SessionMessageTable.data}, '$.cost'), 0)), 0)`,
+        input: sql<number>`coalesce(sum(coalesce(json_extract(${SessionMessageTable.data}, '$.tokens.input'), 0)), 0)`,
+        output: sql<number>`coalesce(sum(coalesce(json_extract(${SessionMessageTable.data}, '$.tokens.output'), 0)), 0)`,
+        reasoning: sql<number>`coalesce(sum(coalesce(json_extract(${SessionMessageTable.data}, '$.tokens.reasoning'), 0)), 0)`,
+        read: sql<number>`coalesce(sum(coalesce(json_extract(${SessionMessageTable.data}, '$.tokens.cache.read'), 0)), 0)`,
+        write: sql<number>`coalesce(sum(coalesce(json_extract(${SessionMessageTable.data}, '$.tokens.cache.write'), 0)), 0)`,
+      })
+      .from(SessionMessageTable)
+      .where(and(eq(SessionMessageTable.session_id, sessionID), eq(SessionMessageTable.type, "assistant")))
+      .get()
+      .pipe(Effect.orDie)
+    if (!row) return
+    yield* db
+      .update(SessionTable)
+      .set({
+        cost: row.cost,
+        tokens_input: row.input,
+        tokens_output: row.output,
+        tokens_reasoning: row.reasoning,
+        tokens_cache_read: row.read,
+        tokens_cache_write: row.write,
+      })
+      .where(eq(SessionTable.id, sessionID))
+      .run()
+      .pipe(Effect.orDie)
+  })
+}
+
 function run(db: DatabaseService, event: SessionEvent.Event) {
   return Effect.gen(function* () {
     const decodeRow = (row: typeof SessionMessageTable.$inferSelect) =>
@@ -377,7 +414,12 @@ const layer = Layer.effectDiscard(
     yield* events.project(SessionEvent.Shell.Started, (event) => run(db, event))
     yield* events.project(SessionEvent.Shell.Ended, (event) => run(db, event))
     yield* events.project(SessionEvent.Step.Started, (event) => run(db, event))
-    yield* events.project(SessionEvent.Step.Ended, (event) => run(db, event))
+    yield* events.project(SessionEvent.Step.Ended, (event) =>
+      Effect.gen(function* () {
+        yield* run(db, event)
+        yield* rollSessionUsage(db, event.data.sessionID)
+      }),
+    )
     yield* events.project(SessionEvent.Step.Failed, (event) => run(db, event))
     yield* events.project(SessionEvent.Text.Started, (event) => run(db, event))
     yield* events.project(SessionEvent.Text.Ended, (event) => run(db, event))
@@ -447,6 +489,7 @@ const layer = Layer.effectDiscard(
           .where(eq(SessionTable.id, event.data.sessionID))
           .run()
           .pipe(Effect.orDie)
+        yield* rollSessionUsage(db, event.data.sessionID)
       }),
     )
   }),

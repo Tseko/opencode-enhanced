@@ -8,7 +8,8 @@ const context = (key: string, partIDs: string[], userMessageID = "user-1") =>
     userMessageID,
     group: {
       key,
-      type: "context",
+      type: "tool",
+      kind: "context",
       refs: partIDs.map((partID) => ({ messageID: "assistant-1", partID })),
     } satisfies PartGroup,
     previousAssistantPart: false,

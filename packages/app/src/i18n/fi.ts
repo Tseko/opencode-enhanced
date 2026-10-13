@@ -16,6 +16,8 @@ export const dict = {
   "command.category.permissions": "Käyttöoikeudet",
   "command.category.workspace": "Työtila",
   "command.category.settings": "Asetukset",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "Järjestelmän mukaan",
   "theme.scheme.light": "Vaalea",
   "theme.scheme.dark": "Tumma",

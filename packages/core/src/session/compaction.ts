@@ -10,8 +10,13 @@ import { SessionSchema } from "./schema"
 import { Token } from "../util/token"
 
 const DEFAULT_BUFFER = 20_000
+const DEFAULT_OUTPUT_RESERVE = 32_000
 const DEFAULT_KEEP_TOKENS = 8_000
-const TOOL_OUTPUT_MAX_CHARS = 2_000
+export const TOOL_OUTPUT_MAX_CHARS = 2_000
+export const PRUNE_MINIMUM = 20_000
+export const PRUNE_PROTECT = 40_000
+export const PRUNED_TOOL_RESULT = "[Old tool result content cleared]"
+const PRUNE_PROTECTED_TOOLS = new Set(["skill"])
 const SUMMARY_OUTPUT_TOKENS = 4_096
 const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
 <template>
@@ -61,6 +66,7 @@ type Entry = {
 
 type Settings = {
   readonly auto: boolean
+  readonly prune: boolean
   readonly buffer: number
   readonly tokens: number
 }
@@ -82,7 +88,7 @@ type Input = {
 
 const estimate = (value: unknown) => Token.estimate(JSON.stringify(value))
 
-const truncate = (value: string) =>
+export const truncateOutput = (value: string) =>
   value.length <= TOOL_OUTPUT_MAX_CHARS ? value : `${value.slice(0, TOOL_OUTPUT_MAX_CHARS)}\n[truncated]`
 
 export const serializeToolContent = (content: SessionMessage.ToolStateCompleted["content"]) =>
@@ -106,7 +112,7 @@ const serialize = (message: SessionMessage.Message) => {
         if (part.state.status === "completed")
           return [
             `[Assistant tool call]: ${part.name}(${input})`,
-            `[Tool result]: ${truncate(serializeToolContent(part.state.content))}`,
+            `[Tool result]: ${part.time.pruned ? PRUNED_TOOL_RESULT : truncateOutput(serializeToolContent(part.state.content))}`,
           ]
         if (part.state.status === "error")
           return [`[Assistant tool call]: ${part.name}(${input})`, `[Tool error]: ${part.state.error.message}`]
@@ -116,7 +122,7 @@ const serialize = (message: SessionMessage.Message) => {
   }
   if (message.type === "system") return `[System update]: ${message.text}`
   if (message.type === "synthetic") return `[Synthetic context]: ${message.text}`
-  if (message.type === "shell") return `[Shell]: ${message.command}\n${truncate(message.output)}`
+  if (message.type === "shell") return `[Shell]: ${message.command}\n${truncateOutput(message.output)}`
   return ""
 }
 
@@ -127,11 +133,124 @@ const settings = (documents: readonly Config.Entry[]) => {
   return configured.reduce<Settings>(
     (result, current) => ({
       auto: current.auto ?? result.auto,
+      prune: current.prune ?? result.prune,
       buffer: current.buffer ?? result.buffer,
       tokens: current.keep?.tokens ?? result.tokens,
     }),
-    { auto: true, buffer: DEFAULT_BUFFER, tokens: DEFAULT_KEEP_TOKENS },
+    { auto: true, prune: false, buffer: DEFAULT_BUFFER, tokens: DEFAULT_KEEP_TOKENS },
   )
+}
+
+/**
+ * Tokens to leave free for the response.
+ *
+ * The runner does not request a generation budget, so the catalog's *maximum* output is not a
+ * real reserve: reserving it (384k for `deepseek/deepseek-flash`, 38 % of a 1M window) discards
+ * most of the advertised context. Reserve the requested budget when there is one, otherwise the
+ * smaller of the catalog maximum and a bounded default.
+ */
+export const reserve = (input: { readonly limits?: { readonly output?: number }; readonly requested?: number }) => {
+  const bounded = Math.min(input.limits?.output ?? DEFAULT_OUTPUT_RESERVE, DEFAULT_OUTPUT_RESERVE)
+  return input.requested !== undefined && input.requested > 0 ? input.requested : bounded
+}
+
+const counted = (message: SessionMessage.Message) =>
+  message.type !== "assistant" || message.tokens === undefined
+    ? undefined
+    : message.tokens.input + message.tokens.output + message.tokens.cache.read + message.tokens.cache.write
+
+/**
+ * Tokens the request is expected to occupy.
+ *
+ * A reported usage count from the last assistant turn anchors the measurement: `Token.estimate`
+ * charges one token per JSON structural character and over-counts real message JSON by ~2.5x
+ * (measured against a live session), so it is applied only to what was added after that
+ * counted turn — tool results and newer messages. The result stays conservative on the growth
+ * while no longer being ~2.5x pessimistic on the dominant part of the request. A turn whose
+ * response the provider did not count falls back to estimating the whole request.
+ */
+export const requestTokens = (input: {
+  readonly entries: readonly { readonly seq: number; readonly message: SessionMessage.Message }[]
+  readonly request: Pick<LLMRequest, "system" | "messages" | "tools">
+}) => {
+  const anchor = input.entries.findLast((entry) => counted(entry.message) !== undefined)
+  if (anchor === undefined)
+    return estimate({ system: input.request.system, messages: input.request.messages, tools: input.request.tools })
+  const growth = input.entries
+    .filter((entry) => entry.seq >= anchor.seq)
+    .flatMap((entry) => {
+      const message = entry.message
+      if (message.type !== "assistant") return [serialize(message)]
+      if (entry === anchor) return toolResults(message)
+      return [serialize(message)]
+    })
+    .join("\n")
+  return counted(anchor.message)! + Token.estimate(growth)
+}
+
+const toolResults = (message: SessionMessage.Assistant) =>
+  message.content.flatMap((part) =>
+    part.type === "tool" && part.state.status === "completed" ? [serializeToolContent(part.state.content)] : [],
+  )
+
+export const pruneToolOutput = (messages: readonly SessionMessage.Message[]) => {
+  const toPrune = selectPrunedToolIDs(messages)
+  if (toPrune.size === 0) return messages
+  return messages.map((message) => {
+    if (message.type !== "assistant") return message
+    if (!message.content.some((part) => part.type === "tool" && toPrune.has(part.id))) return message
+    return SessionMessage.Assistant.make({
+      ...message,
+      content: message.content.map((part) => {
+        if (part.type !== "tool" || !toPrune.has(part.id) || part.state.status !== "completed") return part
+        return SessionMessage.AssistantTool.make({
+          ...part,
+          time: { ...part.time, pruned: part.time.pruned ?? part.time.completed ?? part.time.created },
+          state: SessionMessage.ToolStateCompleted.make({
+            status: "completed",
+            input: part.state.input,
+            content: [{ type: "text", text: PRUNED_TOOL_RESULT }],
+            structured: {},
+          }),
+        })
+      }),
+    })
+  })
+}
+
+const selectPrunedToolIDs = (messages: readonly SessionMessage.Message[]) => {
+  let total = 0
+  let pruned = 0
+  const toPrune: string[] = []
+  let turns = 0
+  loop: for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]
+    if (message.type === "user") turns++
+    if (turns < 2) continue
+    if (message.type !== "assistant") continue
+    for (let partIndex = message.content.length - 1; partIndex >= 0; partIndex--) {
+      const part = message.content[partIndex]
+      if (part.type !== "tool") continue
+      if (part.state.status !== "completed") continue
+      if (PRUNE_PROTECTED_TOOLS.has(part.name)) continue
+      if (part.provider?.executed === true) continue
+      if (part.time.pruned) break loop
+      const estimate = Token.estimate(serializeToolContent(part.state.content))
+      total += estimate
+      if (total <= PRUNE_PROTECT) continue
+      pruned += estimate
+      toPrune.push(part.id)
+    }
+  }
+  if (pruned <= PRUNE_MINIMUM) return new Set<string>()
+  return new Set(toPrune)
+}
+
+const pruneEntries = (entries: readonly Entry[]) => {
+  const messages = entries.map((entry) => entry.message)
+  const pruned = pruneToolOutput(messages)
+  if (pruned === messages) return entries
+  return entries.map((entry, index) => ({ seq: entry.seq, message: pruned[index] }))
 }
 
 const select = (
@@ -147,7 +266,12 @@ const select = (
   let split = conversation.length
   for (let index = conversation.length - 1; index >= 0; index--) {
     const next = total + Token.estimate(conversation[index])
-    if (next > tokens) break
+    if (next > tokens) {
+      // The newest entry is always kept: dropping it would leave the most recent request
+      // neither summarized nor retained, so the compacted context would continue without it.
+      if (split === conversation.length) split = index
+      break
+    }
     total = next
     split = index
   }
@@ -178,16 +302,37 @@ export const make = (dependencies: Dependencies) => {
   const compactAfterOverflow = Effect.fn("SessionCompaction.compactAfterOverflow")(function* (input: Input) {
     const context = input.model.route.defaults.limits?.context
     if (context === undefined || context <= 0) return false
-    const output = input.request.generation?.maxTokens ?? input.model.route.defaults.limits?.output ?? 0
+    const output = reserve({ limits: input.model.route.defaults.limits, requested: input.request.generation?.maxTokens })
     const selected = select(input.entries, config.tokens)
     const previousSummary = input.entries.find((entry) => entry.message.type === "compaction")?.message
-    if (!selected || (selected.head.length === 0 && previousSummary?.type !== "compaction")) return false
+    // A conversation with nothing but compaction messages has nothing to summarize; that is the
+    // normal state of the turn directly after a compaction, so it is not worth a signal.
+    if (!selected) return false
+    // Everything outside the retained tail is a compaction message, so there is nothing left to
+    // summarize. Only system and tool content can still be over budget and compaction cannot
+    // shrink those; firing anyway would re-summarize the prior summary on every turn without
+    // ever reducing the request.
+    if (selected.head.length === 0) {
+      yield* Effect.logWarning("Compaction skipped: no conversation content outside the retained tail", {
+        sessionID: input.sessionID,
+      })
+      return false
+    }
     const summaryPrompt = buildPrompt({
       previousSummary: previousSummary?.type === "compaction" ? previousSummary.summary : undefined,
+      // The prior compaction's retained tail is no longer in the history, so the summarizer has
+      // to see it here to carry it forward into the combined summary.
       context: [previousSummary?.type === "compaction" ? previousSummary.recent : "", selected.head].filter(Boolean),
     })
     const summaryOutput = Math.min(output || SUMMARY_OUTPUT_TOKENS, SUMMARY_OUTPUT_TOKENS)
-    if (Token.estimate(summaryPrompt) > context - summaryOutput) return false
+    if (Token.estimate(summaryPrompt) > context - summaryOutput) {
+      yield* Effect.logWarning("Compaction skipped: the summary prompt does not fit the model window", {
+        sessionID: input.sessionID,
+        context,
+        summaryOutput,
+      })
+      return false
+    }
     const messageID = SessionMessage.ID.create()
     yield* dependencies.events.publish(SessionEvent.Compaction.Started, {
       sessionID: input.sessionID,
@@ -218,7 +363,14 @@ export const make = (dependencies: Dependencies) => {
         Effect.catchTag("LLM.Error", () => Effect.succeed(false)),
       )
     const summary = chunks.join("")
-    if (!summarized || failed || !summary.trim()) return false
+    if (!summarized || failed || !summary.trim()) {
+      yield* Effect.logWarning("Compaction summary failed", {
+        sessionID: input.sessionID,
+        messageID,
+        reason: !summarized ? "llm_error" : failed ? "provider_error" : "empty_summary",
+      })
+      return false
+    }
     yield* dependencies.events.publish(SessionEvent.Compaction.Ended, {
       sessionID: input.sessionID,
       messageID,
@@ -233,16 +385,13 @@ export const make = (dependencies: Dependencies) => {
     if (!config.auto) return false
     const context = input.model.route.defaults.limits?.context
     if (context === undefined || context <= 0) return false
-    const output = input.request.generation?.maxTokens ?? input.model.route.defaults.limits?.output ?? 0
-    if (
-      estimate({ system: input.request.system, messages: input.request.messages, tools: input.request.tools }) <=
-      context - Math.max(output, config.buffer)
-    )
-      return false
+    const output = reserve({ limits: input.model.route.defaults.limits, requested: input.request.generation?.maxTokens })
+    if (requestTokens(input) <= context - Math.max(output, config.buffer)) return false
     return yield* compactAfterOverflow(input)
   })
   return {
     compactIfNeeded,
     compactAfterOverflow,
+    prune: (entries: readonly Entry[]) => (config.prune ? pruneEntries(entries) : entries),
   }
 }

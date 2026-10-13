@@ -20,27 +20,27 @@ interface Prepared {
   readonly baselineSeq: number
 }
 
-export function initialize(
+export function initialize<E>(
   db: DatabaseService,
-  context: Effect.Effect<SystemContext.SystemContext>,
+  context: Effect.Effect<SystemContext.SystemContext, E>,
   sessionID: SessionSchema.ID,
-): Effect.Effect<Prepared | undefined, SystemContext.InitializationBlocked> {
+): Effect.Effect<Prepared | undefined, SystemContext.InitializationBlocked | E> {
   return initializeOnce(db, context, sessionID).pipe(Effect.withSpan("SessionContextEpoch.initialize"))
 }
 
-export function prepare(
+export function prepare<E>(
   db: DatabaseService,
   events: EventV2.Interface,
-  context: Effect.Effect<SystemContext.SystemContext>,
+  context: Effect.Effect<SystemContext.SystemContext, E>,
   sessionID: SessionSchema.ID,
-): Effect.Effect<Prepared, SystemContext.InitializationBlocked | ContextSnapshotDecodeError> {
+): Effect.Effect<Prepared, SystemContext.InitializationBlocked | ContextSnapshotDecodeError | E> {
   return prepareOnce(db, events, context, sessionID).pipe(Effect.withSpan("SessionContextEpoch.prepare"))
 }
 
-const prepareOnce = Effect.fnUntraced(function* (
+const prepareOnce = Effect.fnUntraced(function* <E>(
   db: DatabaseService,
   events: EventV2.Interface,
-  context: Effect.Effect<SystemContext.SystemContext>,
+  context: Effect.Effect<SystemContext.SystemContext, E>,
   sessionID: SessionSchema.ID,
 ) {
   const [value, stored, compaction] = yield* Effect.all(
@@ -77,9 +77,9 @@ const prepareOnce = Effect.fnUntraced(function* (
   return { baseline: stored.baseline, baselineSeq: stored.baseline_seq }
 })
 
-const initializeOnce = Effect.fnUntraced(function* (
+const initializeOnce = Effect.fnUntraced(function* <E>(
   db: DatabaseService,
-  context: Effect.Effect<SystemContext.SystemContext>,
+  context: Effect.Effect<SystemContext.SystemContext, E>,
   sessionID: SessionSchema.ID,
 ) {
   if (yield* exists(db, sessionID)) return

@@ -110,6 +110,8 @@ export const dict = {
   "command.category.workspace": "Workspace",
   "command.category.settings": "Sazlamalar",
   "command.logs.export": "Surnallary eksport ediň",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "Ulgam",
   "theme.scheme.light": "Lightagtylyk",
   "theme.scheme.dark": "Garaňky",

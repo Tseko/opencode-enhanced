@@ -110,6 +110,8 @@ export const dict = {
   "command.category.workspace": "Hapësira e punës",
   "command.category.settings": "Cilësimet",
   "command.logs.export": "Eksporto regjistrat",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "Sistemi",
   "theme.scheme.light": "Drita",
   "theme.scheme.dark": "E errët",

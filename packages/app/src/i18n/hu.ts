@@ -113,6 +113,8 @@ export const dict = {
   "command.category.workspace": "Munkaterület",
   "command.category.settings": "Beállítások",
   "command.logs.export": "Naplók exportálása",
+  "sidebar.session.markAsRead": "Mark as read",
+  "sidebar.session.markAsUnread": "Mark as unread",
   "theme.scheme.system": "Rendszer",
   "theme.scheme.light": "Világos",
   "theme.scheme.dark": "Sötét",

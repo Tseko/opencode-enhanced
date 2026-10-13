@@ -1,14 +1,14 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { llmClient } from "@opencode-ai/core/effect/app-node-platform"
+import { llmClient, providerAdmission } from "@opencode-ai/core/effect/app-node-platform"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Provider } from "@/provider/provider"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
-import { Context, Effect, Layer } from "effect"
+import { Cause, Context, Effect, Layer } from "effect"
 import * as Stream from "effect/Stream"
 import { streamText, wrapLanguageModel, type ModelMessage, type Tool } from "ai"
-import type { LLMEvent } from "@opencode-ai/llm"
-import { LLMClient } from "@opencode-ai/llm/route"
+import { Retry, type LLMEvent } from "@opencode-ai/llm"
+import { LLMClient, ProviderAdmission } from "@opencode-ai/llm/route"
 import type { LLMClientService } from "@opencode-ai/llm/route"
 import { GitLabWorkflowLanguageModel } from "gitlab-ai-provider"
 import { ProviderTransform } from "@/provider/transform"
@@ -59,6 +59,37 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/LL
 
 export const use = serviceUse(Service)
 
+const providerAdmissionKey = (input: StreamRequest, info: unknown): ProviderAdmission.Key => ({
+  provider: input.model.providerID,
+  model: input.model.id,
+  credential: info === undefined ? "anonymous" : ProviderAdmission.fingerprint(JSON.stringify(info)),
+})
+
+const retryAfterFromHeaders = (headers: unknown): number | undefined => {
+  if (typeof headers !== "object" || headers === null) return undefined
+  const record = headers as Readonly<Record<string, string | undefined>>
+  const ms = record["retry-after-ms"]
+  if (ms !== undefined) {
+    const parsed = Number.parseFloat(ms)
+    if (Number.isFinite(parsed) && parsed >= 0) return Math.ceil(parsed)
+  }
+  const seconds = record["retry-after"]
+  if (seconds !== undefined) {
+    const parsed = Number.parseFloat(seconds)
+    if (Number.isFinite(parsed) && parsed >= 0) return Math.ceil(parsed * 1000)
+  }
+  return undefined
+}
+
+const isRetryableProviderError = (error: unknown) => {
+  const status =
+    typeof (error as { readonly statusCode?: unknown }).statusCode === "number"
+      ? (error as { readonly statusCode: number }).statusCode
+      : undefined
+  const message = error instanceof Error ? error.message : String(error)
+  return status === 429 || (status !== undefined && status >= 500) || Retry.matchesTransient(message)
+}
+
 const live: Layer.Layer<
   Service,
   never,
@@ -69,6 +100,7 @@ const live: Layer.Layer<
   | Permission.Service
   | EventV2Bridge.Service
   | LLMClientService
+  | ProviderAdmission.Service
   | RuntimeFlags.Service
 > = Layer.effect(
   Service,
@@ -80,7 +112,25 @@ const live: Layer.Layer<
     const perm = yield* Permission.Service
     const events = yield* EventV2Bridge.Service
     const llmClient = yield* LLMClient.Service
+    const admission = yield* ProviderAdmission.Service
     const flags = yield* RuntimeFlags.Service
+
+    const recordProviderError = (key: ProviderAdmission.Key, error: unknown) =>
+      isRetryableProviderError(error)
+        ? admission.record(key, retryAfterFromHeaders((error as { readonly responseHeaders?: unknown }).responseHeaders))
+        : Effect.void
+
+    const guard = (key: ProviderAdmission.Key, stream: Stream.Stream<LLMEvent, unknown>) =>
+      Stream.unwrap(
+        admission.acquire(key).pipe(
+          Effect.map((release) =>
+            stream.pipe(
+              Stream.ensuring(release),
+              Stream.onError((cause) => recordProviderError(key, Cause.squash(cause))),
+            ),
+          ),
+        ),
+      )
 
     const run = Effect.fn("LLM.run")(function* (input: StreamRequest) {
       yield* Effect.logInfo("stream", {
@@ -103,6 +153,7 @@ const live: Layer.Layer<
       )
 
       const isWorkflow = language instanceof GitLabWorkflowLanguageModel
+      const admissionKey = providerAdmissionKey(input, info)
       const prepared = yield* LLMRequestPrep.prepare({
         ...input,
         provider: item,
@@ -277,18 +328,25 @@ const live: Layer.Layer<
       // LLMAISDK.toLLMEvents below normalizes fullStream parts for the processor.
       return {
         type: "ai-sdk" as const,
+        key: admissionKey,
         result: streamText({
           onError(error) {
             bridge.fork(
-              Effect.logError("stream error", {
-                providerID: input.model.providerID,
-                modelID: input.model.id,
-                "session.id": input.sessionID,
-                small: (input.small ?? false).toString(),
-                agent: input.agent.name,
-                mode: input.agent.mode,
-                error,
-              }),
+              recordProviderError(admissionKey, error).pipe(
+                Effect.andThen(
+                  // The session processor decides whether this attempt is retryable and logs
+                  // the terminal failure separately. Keep recoverable attempts out of ERROR logs.
+                  Effect.logWarning("stream error", {
+                    providerID: input.model.providerID,
+                    modelID: input.model.id,
+                    "session.id": input.sessionID,
+                    small: (input.small ?? false).toString(),
+                    agent: input.agent.name,
+                    mode: input.agent.mode,
+                    error,
+                  }),
+                ),
+              ),
             )
           },
           // Copilot returns the authoritative billed amount only in provider-specific response fields.
@@ -370,11 +428,14 @@ const live: Layer.Layer<
             // Adapter seam: both runtimes expose the same LLMEvent stream. Native
             // already returns one; AI SDK streams are converted here.
             const state = LLMAISDK.adapterState()
-            return Stream.fromAsyncIterable(result.result.fullStream, (e) =>
-              e instanceof Error ? e : new Error(String(e)),
-            ).pipe(
-              Stream.mapEffect((event) => LLMAISDK.toLLMEvents(state, event)),
-              Stream.flatMap((events) => Stream.fromIterable(events)),
+            return guard(
+              result.key,
+              Stream.fromAsyncIterable(result.result.fullStream, (e) =>
+                e instanceof Error ? e : new Error(String(e)),
+              ).pipe(
+                Stream.mapEffect((event) => LLMAISDK.toLLMEvents(state, event)),
+                Stream.flatMap((events) => Stream.fromIterable(events)),
+              ),
             )
           }),
         ),
@@ -397,6 +458,7 @@ export const node = LayerNode.make({
     Permission.node,
     EventV2Bridge.node,
     llmClient,
+    providerAdmission,
     RuntimeFlags.node,
   ],
 })

@@ -57,6 +57,36 @@ describe("session.retry.delay", () => {
     expect(SessionRetry.delay(3, error)).toBe(30000)
   })
 
+  test("honors provider retry hints embedded in messages", () => {
+    const seconds = Schema.decodeUnknownSync(SessionV1.APIError.Schema)(
+      new SessionV1.APIError({
+        message: "Rate limit reached. Please try again in 4.155s.",
+        isRetryable: true,
+      }).toObject(),
+    )
+    const milliseconds = Schema.decodeUnknownSync(SessionV1.APIError.Schema)(
+      new SessionV1.APIError({
+        message: "Rate limit reached. Please try again in 539ms.",
+        isRetryable: true,
+      }).toObject(),
+    )
+
+    expect(SessionRetry.delay(1, seconds)).toBe(4155)
+    expect(SessionRetry.delay(2, milliseconds)).toBe(539)
+  })
+
+  test("honors provider retry hints embedded in response bodies", () => {
+    const error = Schema.decodeUnknownSync(SessionV1.APIError.Schema)(
+      new SessionV1.APIError({
+        message: "Rate limit reached",
+        isRetryable: true,
+        responseBody: '{"error":{"message":"Retry after 1.25 seconds"}}',
+      }).toObject(),
+    )
+
+    expect(SessionRetry.delay(1, error)).toBe(1250)
+  })
+
   test("accepts http-date retry-after values", () => {
     const date = new Date(Date.now() + 20000).toUTCString()
     const error = apiError({ "retry-after": date })
@@ -79,6 +109,11 @@ describe("session.retry.delay", () => {
     const pastDate = new Date(Date.now() - 5000).toUTCString()
     const error = apiError({ "retry-after": pastDate })
     expect(SessionRetry.delay(1, error, 0)).toBe(2000)
+  })
+
+  test("keeps no-hint backoff capped when unrelated response headers exist", () => {
+    const error = apiError({ "content-type": "application/json" })
+    expect(SessionRetry.delay(10, error, 0)).toBe(SessionRetry.RETRY_MAX_DELAY_NO_HEADERS)
   })
 
   test("uses retry-after values even when exceeding 10 minutes with headers", () => {
